@@ -1,0 +1,32 @@
+package com.msastudy.common.event;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import java.time.Instant;
+import java.util.UUID;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+public record PaymentFailedEvent(
+        UUID eventId,
+        Instant occurredAt,
+        String aggregateId,
+        int version,
+        String reservationId,
+        String vehicleId,
+        Reason reason
+) implements DomainEvent {
+
+    public static final String TYPE = "PaymentFailed";
+
+    @JsonProperty("eventType")
+    @Override
+    public String eventType() {
+        return TYPE;
+    }
+
+    public enum Reason {
+        CARD_DECLINED,
+        INSUFFICIENT_LIMIT,
+        GATEWAY_TIMEOUT
+    }
+}
