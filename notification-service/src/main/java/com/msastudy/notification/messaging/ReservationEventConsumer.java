@@ -21,20 +21,16 @@ public class ReservationEventConsumer {
     private final ObjectMapper objectMapper;
 
     @KafkaListener(topics = Topics.RESERVATION_EVENTS)
-    public void onMessage(String payload) {
-        try {
-            JsonNode node = objectMapper.readTree(payload);
-            String eventType = node.get("eventType").asText();
+    public void onMessage(String payload) throws Exception {
+        JsonNode node = objectMapper.readTree(payload);
+        String eventType = node.get("eventType").asText();
 
-            if (ReservationCancelledEvent.TYPE.equals(eventType)) {
-                ReservationCancelledEvent event = objectMapper.readValue(payload, ReservationCancelledEvent.class);
-                log.info("[알림톡] 예약 {}가 취소되었습니다. (사유: {})",
-                        event.reservationId(), event.reason());
-            } else {
-                log.debug("notification-service가 처리하지 않는 이벤트 타입: {}", eventType);
-            }
-        } catch (Exception e) {
-            log.error("reservation-events 처리 실패, payload={}", payload, e);
+        if (ReservationCancelledEvent.TYPE.equals(eventType)) {
+            ReservationCancelledEvent event = objectMapper.readValue(payload, ReservationCancelledEvent.class);
+            log.info("[알림톡] 예약 {}가 취소되었습니다. (사유: {})",
+                    event.reservationId(), event.reason());
+        } else {
+            log.debug("notification-service가 처리하지 않는 이벤트 타입: {}", eventType);
         }
     }
 }

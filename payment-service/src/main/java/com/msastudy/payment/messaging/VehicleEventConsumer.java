@@ -23,19 +23,15 @@ public class VehicleEventConsumer {
     private final PaymentService paymentService;
 
     @KafkaListener(topics = Topics.VEHICLE_EVENTS)
-    public void onMessage(String payload) {
-        try {
-            JsonNode node = objectMapper.readTree(payload);
-            String eventType = node.get("eventType").asText();
+    public void onMessage(String payload) throws Exception {
+        JsonNode node = objectMapper.readTree(payload);
+        String eventType = node.get("eventType").asText();
 
-            if (VehicleAssignedEvent.TYPE.equals(eventType)) {
-                paymentService.handleVehicleAssigned(
-                        objectMapper.readValue(payload, VehicleAssignedEvent.class));
-            } else {
-                log.debug("payment-service가 처리하지 않는 이벤트 타입: {}", eventType);
-            }
-        } catch (Exception e) {
-            log.error("vehicle-events 처리 실패, payload={}", payload, e);
+        if (VehicleAssignedEvent.TYPE.equals(eventType)) {
+            paymentService.handleVehicleAssigned(
+                    objectMapper.readValue(payload, VehicleAssignedEvent.class));
+        } else {
+            log.debug("payment-service가 처리하지 않는 이벤트 타입: {}", eventType);
         }
     }
 }

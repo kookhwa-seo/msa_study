@@ -23,26 +23,22 @@ public class PaymentEventConsumer {
     private final ObjectMapper objectMapper;
 
     @KafkaListener(topics = Topics.PAYMENT_EVENTS)
-    public void onMessage(String payload) {
-        try {
-            JsonNode node = objectMapper.readTree(payload);
-            String eventType = node.get("eventType").asText();
+    public void onMessage(String payload) throws Exception {
+        JsonNode node = objectMapper.readTree(payload);
+        String eventType = node.get("eventType").asText();
 
-            switch (eventType) {
-                case PaymentCompletedEvent.TYPE -> {
-                    PaymentCompletedEvent event = objectMapper.readValue(payload, PaymentCompletedEvent.class);
-                    log.info("[알림톡] 예약 {} 결제가 완료되었습니다. (결제ID: {}, 금액: {})",
-                            event.reservationId(), event.paymentId(), event.amount());
-                }
-                case PaymentFailedEvent.TYPE -> {
-                    PaymentFailedEvent event = objectMapper.readValue(payload, PaymentFailedEvent.class);
-                    log.info("[알림톡] 예약 {} 결제가 실패했습니다. (사유: {})",
-                            event.reservationId(), event.reason());
-                }
-                default -> log.debug("notification-service가 처리하지 않는 이벤트 타입: {}", eventType);
+        switch (eventType) {
+            case PaymentCompletedEvent.TYPE -> {
+                PaymentCompletedEvent event = objectMapper.readValue(payload, PaymentCompletedEvent.class);
+                log.info("[알림톡] 예약 {} 결제가 완료되었습니다. (결제ID: {}, 금액: {})",
+                        event.reservationId(), event.paymentId(), event.amount());
             }
-        } catch (Exception e) {
-            log.error("payment-events 처리 실패, payload={}", payload, e);
+            case PaymentFailedEvent.TYPE -> {
+                PaymentFailedEvent event = objectMapper.readValue(payload, PaymentFailedEvent.class);
+                log.info("[알림톡] 예약 {} 결제가 실패했습니다. (사유: {})",
+                        event.reservationId(), event.reason());
+            }
+            default -> log.debug("notification-service가 처리하지 않는 이벤트 타입: {}", eventType);
         }
     }
 }

@@ -23,19 +23,15 @@ public class ReservationEventConsumer {
     private final VehicleAssignmentService vehicleAssignmentService;
 
     @KafkaListener(topics = Topics.RESERVATION_EVENTS)
-    public void onMessage(String payload) {
-        try {
-            JsonNode node = objectMapper.readTree(payload);
-            String eventType = node.get("eventType").asText();
+    public void onMessage(String payload) throws Exception {
+        JsonNode node = objectMapper.readTree(payload);
+        String eventType = node.get("eventType").asText();
 
-            if (ReservationCreatedEvent.TYPE.equals(eventType)) {
-                vehicleAssignmentService.handleReservationCreated(
-                        objectMapper.readValue(payload, ReservationCreatedEvent.class));
-            } else {
-                log.debug("vehicle-service가 처리하지 않는 이벤트 타입: {}", eventType);
-            }
-        } catch (Exception e) {
-            log.error("reservation-events 처리 실패, payload={}", payload, e);
+        if (ReservationCreatedEvent.TYPE.equals(eventType)) {
+            vehicleAssignmentService.handleReservationCreated(
+                    objectMapper.readValue(payload, ReservationCreatedEvent.class));
+        } else {
+            log.debug("vehicle-service가 처리하지 않는 이벤트 타입: {}", eventType);
         }
     }
 }

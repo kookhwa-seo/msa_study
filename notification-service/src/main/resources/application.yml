@@ -6,6 +6,11 @@ spring:
     name: notification-service
   kafka:
     bootstrap-servers: localhost:9092
+    # notification-service는 원래 이벤트를 발행하지 않지만, DLT(Dead Letter Topic)
+    # 발행에 KafkaTemplate이 필요해 producer 직렬화 설정을 둔다.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
     consumer:
       group-id: notification-service
       auto-offset-reset: earliest

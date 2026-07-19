@@ -24,19 +24,15 @@ public class PaymentEventConsumer {
     private final ReservationService reservationService;
 
     @KafkaListener(topics = Topics.PAYMENT_EVENTS)
-    public void onMessage(String payload) {
-        try {
-            JsonNode node = objectMapper.readTree(payload);
-            String eventType = node.get("eventType").asText();
+    public void onMessage(String payload) throws Exception {
+        JsonNode node = objectMapper.readTree(payload);
+        String eventType = node.get("eventType").asText();
 
-            if (PaymentCompletedEvent.TYPE.equals(eventType)) {
-                reservationService.handlePaymentCompleted(
-                        objectMapper.readValue(payload, PaymentCompletedEvent.class));
-            } else {
-                log.debug("reservation-service가 처리하지 않는 이벤트 타입: {}", eventType);
-            }
-        } catch (Exception e) {
-            log.error("payment-events 처리 실패, payload={}", payload, e);
+        if (PaymentCompletedEvent.TYPE.equals(eventType)) {
+            reservationService.handlePaymentCompleted(
+                    objectMapper.readValue(payload, PaymentCompletedEvent.class));
+        } else {
+            log.debug("reservation-service가 처리하지 않는 이벤트 타입: {}", eventType);
         }
     }
 }
