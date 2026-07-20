@@ -5,5 +5,6 @@ include(
     "reservation-service",
     "vehicle-service",
     "payment-service",
-    "notification-service"
+    "notification-service",
+    "api-gateway"
 )

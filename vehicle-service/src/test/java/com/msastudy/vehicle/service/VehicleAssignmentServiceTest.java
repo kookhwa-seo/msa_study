@@ -19,6 +19,7 @@ import com.msastudy.vehicle.domain.Vehicle;
 import com.msastudy.vehicle.domain.VehicleStatus;
 import com.msastudy.vehicle.outbox.OutboxEvent;
 import com.msastudy.vehicle.outbox.OutboxEventRepository;
+import com.msastudy.vehicle.repository.ProcessedEventRepository;
 import com.msastudy.vehicle.repository.VehicleRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -33,6 +34,7 @@ class VehicleAssignmentServiceTest {
 
     private VehicleRepository vehicleRepository;
     private OutboxEventRepository outboxEventRepository;
+    private ProcessedEventRepository processedEventRepository;
     private ObjectMapper objectMapper;
     private VehicleAssignmentService vehicleAssignmentService;
 
@@ -40,8 +42,10 @@ class VehicleAssignmentServiceTest {
     void setUp() {
         vehicleRepository = mock(VehicleRepository.class);
         outboxEventRepository = mock(OutboxEventRepository.class);
+        processedEventRepository = mock(ProcessedEventRepository.class);
         objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
-        vehicleAssignmentService = new VehicleAssignmentService(vehicleRepository, outboxEventRepository, objectMapper);
+        vehicleAssignmentService = new VehicleAssignmentService(
+                vehicleRepository, outboxEventRepository, processedEventRepository, objectMapper);
     }
 
     @Test

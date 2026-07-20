@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+    <springProperty scope="context" name="appName" source="spring.application.name"/>
+
+    <!--
+      각 서비스가 파일이 아니라 Loki로 로그를 직접 push한다. 라벨은 app/level만 두고
+      reservationId처럼 값이 매번 달라지는 필드는 라벨에 넣지 않는다 — Loki에서 라벨
+      조합마다 별도 스트림이 생겨서, 고카디널리티 값을 라벨로 쓰면 스트림이 폭발적으로
+      늘어난다(Loki 안티패턴). reservationId는 로그 메시지 본문(CONSOLE과 동일한
+      패턴, %X{reservationId})에 실어 보내고, Grafana에서 라인 검색(|=)으로 찾는다.
+    -->
+    <appender name="LOKI" class="com.github.loki4j.logback.Loki4jAppender">
+        <!-- 로컬 개발 피드백 루프용으로 배치 타임아웃을 짧게 둔다 (기본값은 운영 환경
+             기준으로 더 길어서, 로그 몇 줄로는 한참 안 쌓이면 전송이 안 된다). -->
+        <batchMaxItems>10</batchMaxItems>
+        <batchTimeoutMs>1000</batchTimeoutMs>
+        <http class="com.github.loki4j.logback.JavaHttpSender">
+            <url>http://localhost:3100/loki/api/v1/push</url>
+        </http>
+        <format class="com.github.loki4j.logback.JsonEncoder">
+            <label>
+                <pattern>app=${appName},level=%level</pattern>
+            </label>
+            <message>
+                <pattern>${FILE_LOG_PATTERN}</pattern>
+            </message>
+            <sortByTime>true</sortByTime>
+        </format>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="LOKI"/>
+    </root>
+</configuration>

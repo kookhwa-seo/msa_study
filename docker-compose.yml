@@ -77,6 +77,30 @@ services:
     volumes:
       - payment-db-data:/var/lib/postgresql/data
 
+  # 중앙 로그 수집. 각 서비스가 파일이 아니라 Loki HTTP API로 로그를 직접 push한다
+  # (Promtail 불필요 — 서비스가 IntelliJ/gradle로 로컬 실행돼서 컨테이너 파일시스템에
+  # 로그 파일이 없기 때문). reservationId(Saga 상관관계 ID)로 4개 서비스 로그를 한
+  # 화면(Grafana Explore)에서 검색할 수 있다.
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - loki
+
 volumes:
   kafka-data:
   reservation-db-data:

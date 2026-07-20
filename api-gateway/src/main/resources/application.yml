@@ -1,0 +1,41 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      routes:
+        # 실제 비즈니스 API는 reservation-service뿐이다(vehicle/payment는 Kafka 컨슈머
+        # 전용이라 REST API는 없지만 actuator는 떠 있어서 헬스체크만 라우팅한다).
+        # notification-service는 starter-web조차 없는 순수 컨슈머라 라우팅할 HTTP
+        # 대상 자체가 없어 제외한다.
+        - id: reservation-api
+          uri: http://localhost:8081
+          predicates:
+            - Path=/api/reservations/**
+        - id: reservation-health
+          uri: http://localhost:8081
+          predicates:
+            - Path=/services/reservation/**
+          filters:
+            - StripPrefix=2
+        - id: vehicle-health
+          uri: http://localhost:8082
+          predicates:
+            - Path=/services/vehicle/**
+          filters:
+            - StripPrefix=2
+        - id: payment-health
+          uri: http://localhost:8083
+          predicates:
+            - Path=/services/payment/**
+          filters:
+            - StripPrefix=2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway

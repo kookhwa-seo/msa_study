@@ -20,6 +20,7 @@ import com.msastudy.reservation.domain.Reservation;
 import com.msastudy.reservation.domain.ReservationStatus;
 import com.msastudy.reservation.outbox.OutboxEvent;
 import com.msastudy.reservation.outbox.OutboxEventRepository;
+import com.msastudy.reservation.repository.ProcessedEventRepository;
 import com.msastudy.reservation.repository.ReservationRepository;
 import com.msastudy.reservation.web.CreateReservationRequest;
 import java.math.BigDecimal;
@@ -35,6 +36,7 @@ class ReservationServiceTest {
 
     private ReservationRepository reservationRepository;
     private OutboxEventRepository outboxEventRepository;
+    private ProcessedEventRepository processedEventRepository;
     private ObjectMapper objectMapper;
     private ReservationService reservationService;
 
@@ -42,8 +44,10 @@ class ReservationServiceTest {
     void setUp() {
         reservationRepository = mock(ReservationRepository.class);
         outboxEventRepository = mock(OutboxEventRepository.class);
+        processedEventRepository = mock(ProcessedEventRepository.class);
         objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
-        reservationService = new ReservationService(reservationRepository, outboxEventRepository, objectMapper);
+        reservationService = new ReservationService(
+                reservationRepository, outboxEventRepository, processedEventRepository, objectMapper);
     }
 
     @Test

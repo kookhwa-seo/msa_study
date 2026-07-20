@@ -8,10 +8,12 @@ import com.msastudy.common.event.ReservationCreatedEvent;
 import com.msastudy.common.event.Topics;
 import com.msastudy.common.event.VehicleAssignedEvent;
 import com.msastudy.payment.domain.Payment;
+import com.msastudy.payment.domain.ProcessedEvent;
 import com.msastudy.payment.domain.ReservationSnapshot;
 import com.msastudy.payment.outbox.OutboxEvent;
 import com.msastudy.payment.outbox.OutboxEventRepository;
 import com.msastudy.payment.repository.PaymentRepository;
+import com.msastudy.payment.repository.ProcessedEventRepository;
 import com.msastudy.payment.repository.ReservationSnapshotRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -31,6 +33,7 @@ public class PaymentService {
     private final ReservationSnapshotRepository reservationSnapshotRepository;
     private final PaymentRepository paymentRepository;
     private final OutboxEventRepository outboxEventRepository;
+    private final ProcessedEventRepository processedEventRepository;
     private final ObjectMapper objectMapper;
     private final BigDecimal failAboveAmount;
 
@@ -38,12 +41,14 @@ public class PaymentService {
             ReservationSnapshotRepository reservationSnapshotRepository,
             PaymentRepository paymentRepository,
             OutboxEventRepository outboxEventRepository,
+            ProcessedEventRepository processedEventRepository,
             ObjectMapper objectMapper,
             @Value("${app.payment.fail-above-amount}") BigDecimal failAboveAmount
     ) {
         this.reservationSnapshotRepository = reservationSnapshotRepository;
         this.paymentRepository = paymentRepository;
         this.outboxEventRepository = outboxEventRepository;
+        this.processedEventRepository = processedEventRepository;
         this.objectMapper = objectMapper;
         this.failAboveAmount = failAboveAmount;
     }
@@ -54,16 +59,32 @@ public class PaymentService {
      */
     @Transactional
     public void handleReservationCreated(ReservationCreatedEvent event) {
+        if (processedEventRepository.existsById(event.eventId())) {
+            log.info("이미 처리한 이벤트, 스킵: eventId={}, type={}", event.eventId(), ReservationCreatedEvent.TYPE);
+            return;
+        }
+
         reservationSnapshotRepository.save(ReservationSnapshot.of(
                 event.reservationId(), event.customerId(), event.vehicleType(), event.totalAmount()));
+
+        processedEventRepository.save(ProcessedEvent.of(event.eventId()));
     }
 
     /**
      * 결제 시도 + outbox 저장을 하나의 트랜잭션으로 묶는다. 금액이 임계값(app.payment.fail-above-amount)을
      * 넘으면 실패로 시뮬레이션한다 (실제 PG 연동 대신 학습용 결정 규칙).
+     *
+     * Kafka는 at-least-once 전달이라 같은 VehicleAssigned가 재전달될 수 있다. eventId가
+     * 이미 처리된 적 있으면 결제를 다시 시도하지 않고 건너뛴다 — 그렇지 않으면 재전달마다
+     * 결제/Payment 레코드가 중복 생성되고 PaymentCompleted도 중복 발행된다.
      */
     @Transactional
     public void handleVehicleAssigned(VehicleAssignedEvent event) {
+        if (processedEventRepository.existsById(event.eventId())) {
+            log.info("이미 처리한 이벤트, 스킵: eventId={}, type={}", event.eventId(), VehicleAssignedEvent.TYPE);
+            return;
+        }
+
         ReservationSnapshot snapshot = reservationSnapshotRepository.findById(event.reservationId())
                 .orElseThrow(() -> new NoSuchElementException("결제 대상 예약 정보 없음: " + event.reservationId()));
 
@@ -72,6 +93,8 @@ public class PaymentService {
         } else {
             publishCompleted(event, snapshot);
         }
+
+        processedEventRepository.save(ProcessedEvent.of(event.eventId()));
     }
 
     private void publishCompleted(VehicleAssignedEvent event, ReservationSnapshot snapshot) {

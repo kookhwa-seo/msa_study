@@ -12,6 +12,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-json")
     implementation("org.springframework.kafka:spring-kafka")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
+    implementation("com.github.loki4j:loki-logback-appender:1.5.2")
 
     testImplementation("org.springframework.kafka:spring-kafka-test")
 }

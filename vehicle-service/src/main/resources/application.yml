@@ -31,3 +31,9 @@ management:
     web:
       exposure:
         include: health,info
+
+# reservationId(Saga 상관관계 ID)를 MDC에서 읽어 로그 레벨 옆에 노출한다.
+# Zipkin 없이도, 이 값으로 여러 서비스의 로그를 grep해서 하나의 Saga 흐름을 추적할 수 있다.
+logging:
+  pattern:
+    level: "%5p [${spring.application.name},%X{reservationId:-}]"

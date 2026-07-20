@@ -18,6 +18,7 @@ import com.msastudy.payment.domain.ReservationSnapshot;
 import com.msastudy.payment.outbox.OutboxEvent;
 import com.msastudy.payment.outbox.OutboxEventRepository;
 import com.msastudy.payment.repository.PaymentRepository;
+import com.msastudy.payment.repository.ProcessedEventRepository;
 import com.msastudy.payment.repository.ReservationSnapshotRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -35,6 +36,7 @@ class PaymentServiceTest {
     private ReservationSnapshotRepository reservationSnapshotRepository;
     private PaymentRepository paymentRepository;
     private OutboxEventRepository outboxEventRepository;
+    private ProcessedEventRepository processedEventRepository;
     private ObjectMapper objectMapper;
     private PaymentService paymentService;
 
@@ -43,9 +45,11 @@ class PaymentServiceTest {
         reservationSnapshotRepository = mock(ReservationSnapshotRepository.class);
         paymentRepository = mock(PaymentRepository.class);
         outboxEventRepository = mock(OutboxEventRepository.class);
+        processedEventRepository = mock(ProcessedEventRepository.class);
         objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
         paymentService = new PaymentService(
-                reservationSnapshotRepository, paymentRepository, outboxEventRepository, objectMapper, FAIL_ABOVE_AMOUNT);
+                reservationSnapshotRepository, paymentRepository, outboxEventRepository, processedEventRepository,
+                objectMapper, FAIL_ABOVE_AMOUNT);
     }
 
     @Test
