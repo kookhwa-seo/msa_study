@@ -179,6 +179,64 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
 - [x] 5. Payment 서비스 추가 + Saga 체인 완성 (결제 실패 시 보상 트랜잭션)
 - [ ] 6. (선택) Debezium CDC 전환, Kafka Streams 모니터링
 
+## 학습 회고: 왜 공부했고 무엇을 배웠는지
+
+실무에서는 렌터카 도메인을 멀티 모듈 형태(모놀리식)로 개발하고 있는데, 나중에 서비스 트래픽이
+늘어나 MSA 전환이 필요해지는 시점이 오면 서비스를 어떻게 나누고 실제로 MSA로 구현해야 할지
+미리 감을 잡아두고 싶어서 시작한 프로젝트다. 그래서 실무 도메인을 단순화한 렌터카 예약 도메인을
+그대로 가져와서, Debezium 같은 CDC 도구로 손쉽게 처리할 수 있는 부분도 처음엔 일부러 직접
+구현해보며(`@Scheduled` 폴링 퍼블리셔) "MSA로 나눴을 때 프레임워크가 대신 해결해주는 문제가
+정확히 뭔지"를 체감하는 것을 원칙으로 삼았다. 아래는 단계별로 어떤 질문에서 출발했고 무엇을
+확인했는지 정리한 것이다.
+
+- **MSA 서비스 분리 (Database per Service)** — 왜: 서비스를 나눈다는 말은 알아도 "DB까지 왜
+  분리해야 하는지", 동기 호출 없이 서비스가 필요한 데이터를 어떻게 확보하는지 감이 없었다.
+  배운 것: payment-service가 reservation-service를 REST로 호출하는 대신 `ReservationCreated`를
+  구독해서 결제에 필요한 최소한의 정보(`ReservationSnapshot`)만 로컬에 복제해두는 패턴을 직접
+  구현해봄으로써, "서비스 간 결합을 없앤다"는 게 실제로 어떤 트레이드오프(데이터 중복 vs 독립성)인지
+  이해했다.
+- **Kafka 파티션 키와 순서 보장** — 왜: Kafka가 순서를 보장한다는 걸 개념으로만 알고 있었고,
+  실제로 무엇을 key로 잡아야 하는지 감이 없었다. 배운 것: 같은 예약(Saga)에 속한 이벤트가
+  전부 같은 파티션으로 가도록 메시지 key를 항상 `reservationId`로 고정했고, 이벤트 봉투
+  (`eventId/eventType/occurredAt/aggregateId/version`)를 설계하며 스키마 버저닝 개념도 함께
+  익혔다 (`docs/event-schema.md`).
+- **Outbox 패턴** — 왜: "DB에 저장한 다음 바로 Kafka로 발행하면 왜 안 되는지"(dual write
+  problem)를 라이브러리 뒤에 숨기지 않고 직접 겪어보고 싶었다. 배운 것: 비즈니스 데이터 저장과
+  `OutboxEvent` 저장을 하나의 트랜잭션으로 묶고, 별도 폴링(2초 주기 `@Scheduled`)이 이를 읽어
+  Kafka로 발행하는 구조를 직접 구현하면서, 발행 쪽 재시도가 얼마나 단순/불완전할 수 있는지도
+  체감했다 (아래 알려진 한계 참고).
+- **Choreography Saga와 보상 트랜잭션** — 왜: 중앙 오케스트레이터 없이 서비스들이 이벤트에만
+  반응해서 전체 흐름이 어떻게 일관되게 끝나는지 궁금했다. 배운 것: 실패에 반응해야 하는 주체는
+  "실패를 발생시킨 이벤트"가 아니라 "보상을 실제로 수행해야 하는 서비스"라는 원칙을 실제로
+  적용해봤다 — `PaymentFailed`는 vehicle-service가 구독해 배정을 취소(보상)하고, 그 결과인
+  `VehicleReleased`를 reservation-service가 구독해서 최종 취소한다. reservation-service가
+  `PaymentFailed`를 직접 구독하지 않는 이유를 설계하면서 명확해졌다.
+- **컨슈머 멱등성 (at-least-once 전달)** — 왜: Kafka가 최소 한 번 전달을 보장한다는 건 알았지만,
+  중복 수신이 실제로 어떤 문제(중복 배정, 중복 결제)를 일으키는지, 어떻게 막는지 직접 보고 싶었다.
+  배운 것: 서비스마다 `ProcessedEvent`(eventId 처리 원장)를 두고, 이미 처리한 `eventId`면 비즈니스
+  로직을 다시 실행하지 않도록 구현. 동일 메시지를 재발행해서 재배정이 스킵되는 것까지 검증했다.
+  파티션 key로 인한 "순서 보장"과 "멱등성"은 서로 다른 문제라는 걸 이 과정에서 분리해서 이해했다.
+- **Poison message 격리 (재시도 + DLT)** — 왜: 컨슈머가 계속 실패하는 메시지 하나 때문에 같은
+  파티션의 나머지 메시지 처리까지 막힐 수 있다는 걸 실제로 재현해보고 싶었다. 배운 것:
+  `DefaultErrorHandler` + `ExponentialBackOffWithMaxRetries`(1s→2s→4s→8s, 4회) 이후에도 실패하면
+  `DeadLetterPublishingRecoverer`로 `<topic>-dlt` 토픽에 격리하도록 구성. 일부러 잘못된 JSON
+  메시지를 직접 publish해서 DLT로 격리되는 것과, 뒤따르는 정상 메시지는 막히지 않는 것을 확인했다.
+- **분산 환경에서 로그 하나로 흐름 추적하기** — 왜: 서비스가 4~5개로 늘어나니 로그가 흩어져서
+  "이 예약 하나의 처리 흐름"을 따라가기가 어려워졌다. Zipkin 같은 분산 트레이싱 없이 최소한의
+  방법으로 해결할 수 있는지 궁금했다. 배운 것: Kafka 메시지 key(=reservationId)를 컨슈머 쪽에서는
+  `RecordInterceptor`로, Saga 시작점(예약 생성)에서는 수동으로 MDC에 넣어 로그 패턴에 노출시켰다.
+  여기에 더해 각 서비스 로그를 Loki + Grafana로 중앙 수집하도록 구성했는데, `loki-logback-appender`는
+  `application.yml`이 아니라 `logback-spring.xml`에서 `class` 속성을 명시해야만 동작하고 그렇지
+  않으면 Joran이 조용히 no-op 한다는 걸 직접 겪으며 트러블슈팅했다.
+- **API Gateway** — 왜: 클라이언트가 서비스마다 다른 포트/경로를 알아야 하는 게 불편했고, 게이트웨이가
+  실제로 무엇을 대신 처리해주는지 이해하고 싶었다. 배운 것: Spring Cloud Gateway로 라우팅 규칙을
+  구성하면서 어떤 서비스가 실제 비즈니스 REST API를 외부에 노출해야 하는지(reservation-service만
+  해당, vehicle/payment는 actuator만, notification은 아예 웹 서버 없음)를 먼저 구분한 다음에야
+  라우팅 설계가 가능하다는 걸 알게 됐다.
+
+다음 학습 예정(Step 6, 선택)은 지금 직접 만든 폴링 퍼블리셔를 Debezium CDC로 바꿔보면서 "라이브러리가
+정확히 무엇을 대신 처리해주는지" 비교해보는 것과, Kafka Streams로 실시간 집계/모니터링을 붙여보는 것이다.
+
 ## 알려진 한계 (학습 진행에 따라 다룰 예정)
 
 - ~~Kafka는 at-least-once 전달이라 컨슈머가 같은 이벤트를 중복 수신할 수 있는데, 아직 멱등성
