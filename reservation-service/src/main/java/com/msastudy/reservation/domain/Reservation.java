@@ -27,6 +27,8 @@ public class Reservation {
     @Enumerated(EnumType.STRING)
     private VehicleType vehicleType;
 
+    private String model;
+
     private String branchId;
 
     private Instant rentalStartAt;
@@ -45,6 +47,7 @@ public class Reservation {
     public static Reservation create(
             String customerId,
             VehicleType vehicleType,
+            String model,
             String branchId,
             Instant rentalStartAt,
             Instant rentalEndAt,
@@ -54,6 +57,7 @@ public class Reservation {
         reservation.id = UUID.randomUUID().toString();
         reservation.customerId = customerId;
         reservation.vehicleType = vehicleType;
+        reservation.model = model;
         reservation.branchId = branchId;
         reservation.rentalStartAt = rentalStartAt;
         reservation.rentalEndAt = rentalEndAt;

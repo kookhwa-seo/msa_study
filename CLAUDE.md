@@ -17,6 +17,8 @@
    처음부터 포함해서 3/4단계를 합쳐서 진행함)
 5. Payment 서비스 추가해서 Saga 체인 완성 + 실패 시나리오(보상 트랜잭션) 구현 (완료)
 6. (선택) Debezium CDC 전환, Kafka Streams 모니터링
+7. React 프런트엔드 + LLM 기반 자연어 예약 어시스턴트 추가 (완료 — mock LLM로 구조만 우선 구현)
+8. 로컬 LLM(Ollama) 실제 연동 + 전국 8개 광역시 법정동 단위로 지점 데이터 확장 (완료)
 
 ## 아키텍처
 - Database per Service: 서비스별 Postgres 인스턴스 분리 (`docker-compose.yml`의
@@ -35,7 +37,12 @@
   (→ CONFIRMED), `VehicleReleased` 구독(→ CANCELLED, 결제 실패 보상 완료 시점). `PaymentFailed`는
   직접 구독하지 않는다 — vehicle-service의 보상이 끝났다는 신호(`VehicleReleased`)로 반응한다.
 - `vehicle-service`: 차량 재고/배정 관리. `ReservationCreated` 구독 → 배정 성공/실패 발행.
-  `PaymentFailed` 구독 → 배정 취소(보상) 후 `VehicleReleased` 발행.
+  `PaymentFailed` 구독 → 배정 취소(보상) 후 `VehicleReleased` 발행. `branchId`는 법정동코드
+  (10자리, 예: `1168010500` = 서울 강남구 삼성동)다. 서울/부산/대구/인천/광주/대전/울산/세종
+  8개 광역시의 법정동 전체(1,523곳, `src/main/resources/branches.json`)를 `BranchCatalog`가
+  기동 시 메모리에 올리고, `VehicleInventorySeeder`가 지점마다 차종별 0~3대를 고정 시드(42)로
+  무작위 시딩한다. `GET /api/branches`(reservation-service 다음으로 두 번째 실제 비즈니스
+  REST API)가 이 카탈로그를 그대로 반환해 프런트엔드의 시/도→시/군/구→동 드롭다운을 지원한다.
 - `payment-service`: 결제 처리(금액이 `app.payment.fail-above-amount`를 넘으면 실패로 시뮬레이션).
   `ReservationCreated` 구독(→ 로컬 스냅샷 저장, reservation-service 동기 호출 대신 필요한 데이터만
   복사), `VehicleAssigned` 구독 → 결제 시도 → `PaymentCompleted` / `PaymentFailed` 발행.
@@ -43,6 +50,22 @@
   로그로 출력하는 수준으로 단순화. Outbox 패턴 대상 아님(멱등성 중요도 낮음).
 - `common`: 서비스 간 공유 이벤트 payload record (`com.msastudy.common.event.*`)만 포함.
   Outbox/Kafka 설정 등 인프라 코드는 넣지 않는다.
+- `llm-service`: 자연어로 예약 요청을 받아 구조화된 필드(차종/지점/기간/금액)로 슬롯 채우기
+  (slot filling)를 해주는 무상태 REST 서비스(8086). DB/Kafka 없음 — Saga에 참여하지 않고
+  Choreography와 무관한 순수 UI 보조 기능이라 "서비스 간 직접 REST 호출 금지" 원칙의 예외가
+  아니다(다른 서비스를 호출하지 않는다). `LlmClient` 인터페이스에 두 구현체가 있다:
+  기본값인 `OllamaLlmClient`(로컬 Ollama `gemma3:4b` 실제 호출, `app.llm.provider=ollama`)와
+  정규식 기반 `MockLlmClient`(`app.llm.provider=mock`, API 키/Ollama 없이 구조만 볼 때).
+  직접 실험해보니 로컬 LLM이 상대 날짜 계산은 신뢰할 수 없어서 날짜는 두 구현체 모두
+  `KoreanDateExtractor`(결정적 파서)에 맡긴다. 지점도 같은 이유로 LLM에게 최종 코드를
+  직접 고르게 하지 않는다 — LLM/mock은 지역을 가리키는 원문 텍스트만 뽑고
+  (`locationText`), `BranchMatcher`가 vehicle-service와 동일한 `branches.json`(자체 복제본,
+  REST로 조회하지 않음)을 동/구/시도 순으로 단계적으로 대조해 실제 법정동코드로 확정한다.
+  프런트엔드가 이 서비스의 응답으로 예약 폼을 채운 뒤, 최종 제출은 항상 reservation-service의
+  정식 REST API로 한다(llm-service가 예약을 대신 생성하지 않는다).
+- `frontend`: React(Vite + TypeScript) 프런트엔드. 대시보드(예약 목록 폴링 + 수동 생성 폼)와
+  예약 어시스턴트(챗봇 UI) 두 화면. 모든 API 호출은 api-gateway(8085)를 거친다 — 브라우저가
+  각 서비스 포트를 직접 알 필요가 없게 하는 것이 API Gateway를 둔 이유이기도 하다.
 
 ## 코딩 컨벤션
 - Spring Boot 3.4.x, Java 21 (Gradle Kotlin DSL, 멀티모듈).

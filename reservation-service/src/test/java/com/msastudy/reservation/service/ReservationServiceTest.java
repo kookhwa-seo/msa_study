@@ -55,6 +55,7 @@ class ReservationServiceTest {
         CreateReservationRequest request = new CreateReservationRequest(
                 "CUST-1",
                 VehicleType.COMPACT,
+                "아반떼",
                 "SEOUL_GANGNAM",
                 Instant.parse("2026-07-10T00:00:00Z"),
                 Instant.parse("2026-07-12T00:00:00Z"),
@@ -86,7 +87,7 @@ class ReservationServiceTest {
     @Test
     void handleVehicleAssigned_marksPaymentPending() {
         Reservation reservation = Reservation.create(
-                "CUST-1", VehicleType.COMPACT, "SEOUL_GANGNAM",
+                "CUST-1", VehicleType.COMPACT, "아반떼", "SEOUL_GANGNAM",
                 Instant.now(), Instant.now().plusSeconds(3600), new BigDecimal("100000"));
         when(reservationRepository.findById(reservation.getId())).thenReturn(Optional.of(reservation));
 
@@ -102,7 +103,7 @@ class ReservationServiceTest {
     @Test
     void handlePaymentCompleted_confirmsReservation() {
         Reservation reservation = Reservation.create(
-                "CUST-1", VehicleType.COMPACT, "SEOUL_GANGNAM",
+                "CUST-1", VehicleType.COMPACT, "아반떼", "SEOUL_GANGNAM",
                 Instant.now(), Instant.now().plusSeconds(3600), new BigDecimal("100000"));
         reservation.markPaymentPending();
         when(reservationRepository.findById(reservation.getId())).thenReturn(Optional.of(reservation));
@@ -119,7 +120,7 @@ class ReservationServiceTest {
     @Test
     void handleVehicleReleased_cancelsReservationAndPublishesCancelledEventWithPaymentFailedReason() throws Exception {
         Reservation reservation = Reservation.create(
-                "CUST-1", VehicleType.SUV, "SEOUL_GANGNAM",
+                "CUST-1", VehicleType.SUV, "싼타페", "SEOUL_GANGNAM",
                 Instant.now(), Instant.now().plusSeconds(3600), new BigDecimal("2000000"));
         reservation.markPaymentPending();
         when(reservationRepository.findById(reservation.getId())).thenReturn(Optional.of(reservation));
@@ -155,7 +156,7 @@ class ReservationServiceTest {
     @Test
     void handleVehicleAssignFailed_cancelsReservationAndPublishesCancelledEvent() throws Exception {
         Reservation reservation = Reservation.create(
-                "CUST-1", VehicleType.VAN, "BUSAN_HAEUNDAE",
+                "CUST-1", VehicleType.VAN, "카니발", "BUSAN_HAEUNDAE",
                 Instant.now(), Instant.now().plusSeconds(3600), new BigDecimal("300000"));
         when(reservationRepository.findById(reservation.getId())).thenReturn(Optional.of(reservation));
 

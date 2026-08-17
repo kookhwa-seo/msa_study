@@ -10,6 +10,7 @@ import java.time.Instant;
 public record CreateReservationRequest(
         @NotBlank String customerId,
         @NotNull VehicleType vehicleType,
+        @NotBlank String model,
         @NotBlank String branchId,
         @NotNull Instant rentalStartAt,
         @NotNull Instant rentalEndAt,

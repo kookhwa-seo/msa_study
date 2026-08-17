@@ -46,6 +46,7 @@ public class ReservationService {
         Reservation reservation = Reservation.create(
                 request.customerId(),
                 request.vehicleType(),
+                request.model(),
                 request.branchId(),
                 request.rentalStartAt(),
                 request.rentalEndAt(),

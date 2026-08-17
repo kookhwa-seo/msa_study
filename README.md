@@ -32,25 +32,64 @@
 - payment-service는 reservation-service를 동기 호출하지 않고, `ReservationCreated`를 구독해
   결제에 필요한 금액 정보만 로컬에 복사해둡니다(`ReservationSnapshot`) — Choreography Saga에서
   "필요한 데이터는 이벤트로 전달받아 로컬에 보관" 패턴을 보여주는 지점입니다.
+- **프런트엔드 / LLM 어시스턴트**: React 프런트엔드는 API Gateway(8085) 하나만 알면 되고,
+  브라우저는 각 서비스 포트를 직접 호출하지 않습니다. `llm-service`는 Saga에 참여하지 않는
+  무상태 REST 서비스로, 자연어 메시지를 예약 필드로 변환해줄 뿐 예약을 직접 생성하지 않습니다
+  (프런트엔드가 그 결과를 받아 reservation-service의 정식 API로 제출) — 그래서 "서비스 간
+  직접 REST 호출 금지" 원칙과 충돌하지 않습니다.
 
 ## 서비스 구성
 
 | 서비스 | 포트 | 담당 | 상태 |
 |---|---|---|---|
+| api-gateway | 8085 | 단일 진입점, `/api/reservations`·`/api/branches`·`/api/chat` 라우팅 + CORS | 구현됨 |
 | reservation-service | 8081 | 예약 생성/조회, Saga 시작점 | 구현됨 |
-| vehicle-service | 8082 | 차량 재고/배정, 결제 실패 보상(재고 반환) | 구현됨 |
+| vehicle-service | 8082 | 차량 재고/배정, 결제 실패 보상(재고 반환), 지점(법정동) 카탈로그 조회 API | 구현됨 |
 | payment-service | 8083 | 결제 처리(금액 기준 성공/실패 시뮬레이션) | 구현됨 |
 | notification-service | 8084 | 알림(로그 시뮬레이션) | 구현됨 |
+| llm-service | 8086 | 자연어 예약 요청 → 구조화된 필드 추출(로컬 Ollama LLM, mock으로도 전환 가능) | 구현됨 |
+| frontend | 5173 (dev) | React 대시보드 + 예약 어시스턴트 UI | 구현됨 |
 
 예약 상태 전이: `PENDING` → (배정 성공) `PAYMENT_PENDING` → (결제 성공) `CONFIRMED`,
 또는 `PENDING`/`PAYMENT_PENDING` → (배정 실패 또는 결제 실패 보상 완료) `CANCELLED`.
 자세한 이벤트/상태 다이어그램은 [`docs/event-schema.md`](./docs/event-schema.md) 참고.
+
+### 지점(법정동) 데이터
+
+`branchId`는 더 이상 `SEOUL_GANGNAM` 같은 고정 상수가 아니라 **법정동코드**(10자리)입니다.
+서울/부산/대구/인천/광주/대전/울산/세종 8개 광역시의 법정동 전체(1,523곳)를
+[국토교통부 전국 법정동](https://www.data.go.kr/data/15063424/fileData.do) 공식 데이터
+([code.go.kr 법정동코드목록조회](https://www.code.go.kr/stdcode/regCodeL.do)에서 조회, 이용허락범위
+제한 없음)에서 가져와 `vehicle-service`·`llm-service` 양쪽에 `branches.json`으로 각각 번들했습니다
+(서비스 독립 실행 원칙 때문에 REST로 서로 조회하지 않고 복제했습니다). 조회 시점(2026-08-17
+기준)에 광주광역시는 "전남광주통합특별시"로 행정구역이 통합된 상태여서, 그 안에서 원래 광주의
+5개 구(동구·서구·남구·북구·광산구)만 걸러내 "광주광역시"로 표기했습니다.
+
+- 지점 목록 전체 조회: `GET /api/branches` (vehicle-service, 게이트웨이로는 `/api/branches`)
+- 지점별 재고 조회: `GET /api/branches/{branchId}/stock` → `{"COMPACT": 2, "SUV": 0, "VAN": 1}`처럼
+  차종별 `AVAILABLE` 대수를 반환합니다. 프런트엔드가 예약을 만들기 전에 재고를 미리 보여줘서,
+  재고 없는 조합으로 예약해 배정 실패로 끝나는 걸 피하게 해줍니다.
+- 차량 재고는 지점(동)마다 차종별로 0~3대를 무작위(고정 시드 42, 재기동해도 항상 같은 분포)로
+  시딩합니다 — 그래서 특정 지점/차종 조합은 처음부터 재고가 0일 수 있고, 이게 배정 실패
+  시나리오를 자연스럽게 재현합니다.
+
+### 차량 모델(model)
+
+예약에는 차종(`vehicleType`: COMPACT/SUV/VAN) 외에 실제 모델명(`model`, 예: "쏘나타", "카니발")도
+자유 텍스트로 입력·저장됩니다. `reservation-service`의 `Reservation`에만 있는 필드로, Kafka 이벤트
+payload에는 포함하지 않습니다(vehicle-service/payment-service는 배정·결제 로직에 모델명이 필요
+없어서, 공유 계약을 늘리는 대신 이 서비스 안에만 두었습니다). 챗봇에서는 "쏘렌토로 렌트하고
+싶어"처럼 모델명만 말해도 LLM이 그 모델이 어떤 차종인지 상식으로 유추해서 `vehicleType`까지
+같이 채워줍니다. **주의**: 모델명은 정보성 필드일 뿐, 실제 차량 배정(재고 매칭)은 여전히
+`vehicleType` + `branchId` 기준입니다 — 1,523개 지점마다 모델별 재고를 따로 관리하지는 않습니다.
 
 ## 기술 스택
 
 - Spring Boot 3.4, Java 21 (Gradle Kotlin DSL 멀티모듈)
 - Kafka (KRaft 모드, Zookeeper 없음), Kafka UI
 - PostgreSQL 16 (서비스별 분리)
+- Spring Cloud Gateway (API Gateway), React 19 + TypeScript + Vite (프런트엔드)
+- Loki + Grafana (중앙 로그 수집)
 - Docker Compose로 인프라 구동
 
 ## 로컬 실행
@@ -65,6 +104,16 @@ sdk install java 21.0.5-tem
 ```
 
 Gradle은 wrapper(`./gradlew`)를 사용하므로 별도 설치가 필요 없습니다.
+
+`llm-service`는 기본값(`app.llm.provider=ollama`)으로 로컬 [Ollama](https://ollama.com)를 호출합니다.
+Ollama 없이 정규식 기반 mock만 쓰려면 `llm-service/src/main/resources/application.yml`의
+`app.llm.provider`를 `mock`으로 바꾸면 됩니다.
+
+```bash
+brew install ollama
+ollama serve                 # 별도 터미널에서 계속 실행
+ollama run gemma3:4b         # 최초 1회 모델 다운로드(~3.3GB)
+```
 
 ### 1. 인프라 기동
 
@@ -83,6 +132,8 @@ docker compose up -d
 ./gradlew :vehicle-service:bootRun
 ./gradlew :payment-service:bootRun
 ./gradlew :notification-service:bootRun
+./gradlew :api-gateway:bootRun
+./gradlew :llm-service:bootRun
 ```
 
 기동 확인 (notification-service는 웹 서버가 없어 헬스체크 엔드포인트가 없습니다 — 로그로 확인):
@@ -91,13 +142,48 @@ docker compose up -d
 curl http://localhost:8081/actuator/health
 curl http://localhost:8082/actuator/health
 curl http://localhost:8083/actuator/health
+curl http://localhost:8085/actuator/health   # api-gateway
+curl http://localhost:8086/actuator/health   # llm-service
 ```
 
-vehicle-service는 최초 기동 시 샘플 재고(COMPACT x2, SUV x1, VAN x1, 지점 `SEOUL_GANGNAM`)를
-자동으로 시딩합니다. payment-service는 `app.payment.fail-above-amount`(기본 1,000,000원)를
-초과하는 예약을 결제 실패로 시뮬레이션합니다 (`payment-service/src/main/resources/application.yml`).
+vehicle-service는 최초 기동 시 8개 광역시 1,523개 법정동 전체에 차종별 재고를 자동으로
+시딩합니다(위 "지점(법정동) 데이터" 참고). payment-service는 `app.payment.fail-above-amount`
+(기본 1,000,000원)를 초과하는 예약을 결제 실패로 시뮬레이션합니다
+(`payment-service/src/main/resources/application.yml`).
+
+### 3. 프런트엔드 실행
+
+```bash
+cd frontend
+npm install   # 최초 1회
+npm run dev
+```
+
+http://localhost:5173 에서 접속합니다. 모든 API 호출은 api-gateway(8085)를 거치므로
+api-gateway와 위 백엔드 서비스들이 먼저 떠 있어야 합니다. `frontend/.env.development`의
+`VITE_API_BASE_URL`로 게이트웨이 주소를 바꿀 수 있습니다.
+
+- **대시보드**(`/`): 예약 생성 폼(고객 ID/차종/모델명/지점/기간/금액) + 예약 목록(2초 폴링).
+  지점은 시/도 → 시/군/구 → 동 3단계 드롭다운으로 고릅니다. 지점을 고르면 바로 아래에 차종별
+  재고 뱃지(예: "소형 2대", "SUV 0대")가 뜨고, 이것도 예약 목록과 같은 2초 주기로 계속
+  갱신됩니다 — 예약을 만들고 나면 처음엔 재고가 그대로 보이다가, vehicle-service가 실제로
+  배정을 끝내는 몇 초 후에 숫자가 줄어드는 걸 볼 수 있습니다(아래 "학습 회고" 참고). 재고가
+  0인 차종을 선택 중이면 노란 경고 문구가 뜹니다. 제출 후에는 목록이 자동 새로고침되며 Saga가
+  진행됨에 따라 상태 배지가 `PENDING` → `PAYMENT_PENDING` → `CONFIRMED`/`CANCELLED`로 바뀌는
+  걸 실시간으로 볼 수 있습니다.
+- **예약 어시스턴트**(`/chat`): 자연어로 예약 정보를 입력하면 llm-service(기본값: 로컬 Ollama
+  `gemma3:4b`, `app.llm.provider=mock`으로 전환 가능)가 문장에서 차종/모델명/지점/기간/금액을
+  추출해 우측 패널에 채워줍니다. 지점은 "왕십리", "강남구 삼성동"처럼 전국 어디든 자유롭게
+  말해도 됩니다 — LLM은 언급된 지역 텍스트만 뽑고, 실제 지점 코드로 매칭하는 건 결정적인
+  코드가 담당합니다. "쏘렌토로 렌트하고 싶어"처럼 모델명만 말해도 차종을 함께 유추합니다.
+  대시보드와 마찬가지로 지점이 정해지면 재고 뱃지/경고가 뜹니다. 모든 정보가 모이면
+  '예약 확정하기' 버튼으로 실제 예약을 생성합니다(이때도 reservation-service의 정식 API를
+  그대로 사용).
 
 ## API 사용 예시
+
+지점 코드는 `curl http://localhost:8085/api/branches`로 전체 목록을 확인할 수 있습니다.
+아래 예시는 그중 실제로 존재하는 코드 몇 개를 그대로 씁니다.
 
 ### 1. 재고 있음 + 결제 성공 → 자동 확정
 
@@ -107,15 +193,17 @@ curl -X POST http://localhost:8081/api/reservations \
   -d '{
     "customerId": "CUST-1",
     "vehicleType": "SUV",
-    "branchId": "SEOUL_GANGNAM",
+    "model": "쏘렌토",
+    "branchId": "1168010500",
     "rentalStartAt": "2026-07-10T00:00:00Z",
     "rentalEndAt": "2026-07-12T00:00:00Z",
     "totalAmount": 200000
   }'
 ```
 
-응답의 `reservationId`로 상태를 조회하면 수 초 내(outbox 폴링 주기 2초 x 왕복 홉 수) `PENDING`
-→ `PAYMENT_PENDING`(차량 배정 완료, 결제 대기) → `CONFIRMED`(결제 완료)로 바뀝니다.
+`branchId: 1168010500`는 서울특별시 강남구 삼성동입니다. 응답의 `reservationId`로 상태를 조회하면
+수 초 내(outbox 폴링 주기 2초 x 왕복 홉 수) `PENDING` → `PAYMENT_PENDING`(차량 배정 완료, 결제
+대기) → `CONFIRMED`(결제 완료)로 바뀝니다.
 
 ```bash
 curl http://localhost:8081/api/reservations/{reservationId}
@@ -128,16 +216,20 @@ curl -X POST http://localhost:8081/api/reservations \
   -H "Content-Type: application/json" \
   -d '{
     "customerId": "CUST-2",
-    "vehicleType": "VAN",
-    "branchId": "BUSAN_HAEUNDAE",
+    "vehicleType": "SUV",
+    "model": "투싼",
+    "branchId": "1111010100",
     "rentalStartAt": "2026-07-10T00:00:00Z",
     "rentalEndAt": "2026-07-12T00:00:00Z",
     "totalAmount": 300000
   }'
 ```
 
-vehicle-service가 재고를 찾지 못해 `VehicleAssignFailed`를 발행하고, reservation-service가
-이를 소비해 `PENDING` → `CANCELLED`로 전환하며 `ReservationCancelled` 이벤트를 다시 발행합니다.
+`branchId: 1111010100`(서울특별시 종로구 청운동)은 고정 시드로 시딩했을 때 SUV 재고가 0으로
+나오는 지점입니다. vehicle-service가 재고를 찾지 못해 `VehicleAssignFailed`를 발행하고,
+reservation-service가 이를 소비해 `PENDING` → `CANCELLED`로 전환하며 `ReservationCancelled`
+이벤트를 다시 발행합니다. (다른 지점/차종 조합도 재고가 0일 수 있습니다 — vehicle-db에서
+직접 확인하거나 `/api/branches`와 대시보드 목록을 같이 보면 재현하기 쉽습니다.)
 
 ### 3. 재고 있음 + 결제 실패(금액 초과) → 배정 취소 보상 후 최종 취소
 
@@ -149,7 +241,8 @@ curl -X POST http://localhost:8081/api/reservations \
   -d '{
     "customerId": "CUST-3",
     "vehicleType": "VAN",
-    "branchId": "SEOUL_GANGNAM",
+    "model": "카니발",
+    "branchId": "1168010500",
     "rentalStartAt": "2026-08-01T00:00:00Z",
     "rentalEndAt": "2026-08-05T00:00:00Z",
     "totalAmount": 2000000
@@ -178,6 +271,9 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
 - [x] 3~4. Reservation ↔ Vehicle, Outbox 패턴 포함 Kafka 이벤트 통신
 - [x] 5. Payment 서비스 추가 + Saga 체인 완성 (결제 실패 시 보상 트랜잭션)
 - [ ] 6. (선택) Debezium CDC 전환, Kafka Streams 모니터링
+- [x] 7. React 프런트엔드 + LLM 기반 자연어 예약 어시스턴트 (mock LLM로 구조 우선 구현)
+- [x] 8. 로컬 LLM(Ollama) 실제 연동 + 전국(8개 광역시) 법정동 단위 지점 데이터로 확장
+- [x] 9. 차량 모델명 필드 + 지점별 실시간 재고 가시성(폴링) 추가, RAG(임베딩 매칭) 실험
 
 ## 학습 회고: 왜 공부했고 무엇을 배웠는지
 
@@ -230,9 +326,48 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
   않으면 Joran이 조용히 no-op 한다는 걸 직접 겪으며 트러블슈팅했다.
 - **API Gateway** — 왜: 클라이언트가 서비스마다 다른 포트/경로를 알아야 하는 게 불편했고, 게이트웨이가
   실제로 무엇을 대신 처리해주는지 이해하고 싶었다. 배운 것: Spring Cloud Gateway로 라우팅 규칙을
-  구성하면서 어떤 서비스가 실제 비즈니스 REST API를 외부에 노출해야 하는지(reservation-service만
-  해당, vehicle/payment는 actuator만, notification은 아예 웹 서버 없음)를 먼저 구분한 다음에야
-  라우팅 설계가 가능하다는 걸 알게 됐다.
+  구성하면서 어떤 서비스가 실제 비즈니스 REST API를 외부에 노출해야 하는지를 먼저 구분한 다음에야
+  라우팅 설계가 가능하다는 걸 알게 됐다. (당시엔 reservation-service만 REST API가 있었는데, 8단계에서
+  vehicle-service에 지점 조회 API가 추가되면서 이 구분이 실제로 한 번 더 쓰였다.)
+- **로컬 LLM 연동과 "LLM + 결정적 도구" 패턴** — 왜: mock으로 구조만 잡아둔 걸 실제 로컬 LLM(Ollama
+  `gemma3:4b`)으로 바꾸면 뭐가 달라지는지, 그리고 실제 LLM이라고 모든 걸 다 잘하는 건 아니라는 걸
+  직접 확인하고 싶었다. 배운 것: 4B급 로컬 모델은 "다음주 화요일" 같은 날짜 계산이나 (예를 들어)
+  "동성로3가" 같은 정확한 지점 코드를 1,500여 개 후보 중에서 직접 고르는 일은 신뢰할 수 없었다.
+  그래서 날짜는 결정적 파서(`KoreanDateExtractor`)에, 지점은 LLM이 "지역 텍스트만 추출"하고
+  결정적 매칭기(`BranchMatcher`, 동 이름 → 없으면 구 이름 → 없으면 시/도 이름 순으로 단계적으로
+  완화하며 대조)가 실제 코드로 변환하는 역할 분담을 하게 됐다 — LLM은 자유로운 자연어 이해에,
+  정확한 계산/매칭은 코드에 맡기는 게 실무에서도 흔한 패턴이라는 걸 직접 겪으며 이해했다.
+- **행정구역 데이터로 실제 서비스 범위 넓히기** — 왜: 지점이 강남/해운대 두 곳뿐이면 "왕십리"
+  같은 흔한 지명도 인식을 못 한다는 걸 사용자 피드백으로 알게 됐고, 실제 정부 공개 데이터로
+  전국 단위까지 확장하면 뭐가 달라지는지 보고 싶었다. 배운 것: 국토교통부 법정동 데이터를 받아
+  8개 광역시(1,523개 동)로 필터링해 vehicle-service(재고 시딩 + 조회 API)와 llm-service(지점
+  매칭)에 각각 복제했다. 이 과정에서 "강남"이라는 말만으로는 실제 법정동 이름(강남구엔 '강남동'이
+  없고 역삼동/삼성동 등으로 구성)과 매칭이 안 된다는 걸 발견해서, 동 이름 → 구 이름 → 시/도 이름
+  순으로 단계적으로 완화하는 매칭 전략을 직접 설계해야 했다. 또 조회 시점 기준으로 광주광역시가
+  "전남광주통합특별시"로 행정구역이 통합돼 있어서, 공식 데이터라고 해도 이름이 고정돼 있지 않고
+  시점에 따라 달라진다는 것도 실제로 겪었다.
+
+- **재고 가시성 기능으로 eventual consistency 직접 체감** — 왜: "PENDING 예약을 UI에서 바로
+  PAYMENT_PENDING으로 만들 수 있게 해달라"는 요청에서 출발했는데, 실제 의도를 확인해보니
+  "재고 있는 조합을 미리 알고 싶다"는 거였다(Saga 상태를 UI가 직접 바꾸는 건 이 프로젝트의
+  핵심 원칙과 충돌해서 제외). 배운 것: 지점별 재고 조회 API(`GET /api/branches/{id}/stock`)를
+  만들고 프런트에서 처음엔 한 번만 조회하게 했더니, "예약을 만들어도 재고 숫자가 안 바뀐다"는
+  피드백을 받았다 — 이유를 파고들어 보니 프런트 문제가 아니라, **예약 생성 시점엔 아직 실제
+  차량 배정이 안 일어난 상태**라는 걸 다시 확인하게 됐다(reservation-db는 즉시 바뀌지만
+  vehicle-db는 vehicle-service가 Outbox 이벤트를 처리할 때까지 몇 초 그대로다 — 이게 바로
+  eventual consistency). 예약 목록과 같은 2초 폴링을 재고 조회에도 적용해서, 재고 숫자가
+  실제 배정 처리 후 줄어드는 걸 볼 수 있게 했다.
+- **RAG(임베딩 매칭) 실험 — 안 되는 것도 구현 전에 확인하는 습관** — 왜: 지점 매칭이 "왕십리"
+  같은 동 이름 자체는 인식해도 "코엑스 근처" 같은 랜드마크는 인식 못 하길래, 임베딩으로 의미
+  기반 검색을 붙이면 해결될지 궁금했다. 배운 것: 전체 기능을 만들기 전에 로컬에서 먼저
+  검증해봤는데(Ollama `nomic-embed-text`로 "코엑스 근처"와 후보 동 이름들의 코사인 유사도를
+  직접 계산), 정답(삼성동)이 무관한 동보다도 낮게 나왔다. 채팅 모델(`gemma3:4b`)에게 "코엑스가
+  어느 구에 있어?"라고 직접 물어봐도 틀린 답(송파구, 정답은 강남구)이 나와서, 문제가 임베딩
+  방식 자체가 아니라 **로컬 모델들이 애초에 이 정도로 구체적인 지리 지식을 갖고 있지 않다**는
+  걸 확인했다. RAG는 "검색 대상에 정답이 있어야" 의미가 있는데, 여기선 검색 대상(1,523개
+  동 이름)에 "코엑스"라는 정보 자체가 없어서 임베딩을 아무리 잘 써도 풀리지 않는 문제였다.
+  기능을 다 만들고 나서 안 되는 걸 알기보다, 작은 스크립트로 먼저 검증해서 시간을 아꼈다 —
+  날짜 계산 때(4B 모델이 상대 날짜를 못 다룸을 미리 확인) 썼던 것과 같은 습관이다.
 
 다음 학습 예정(Step 6, 선택)은 지금 직접 만든 폴링 퍼블리셔를 Debezium CDC로 바꿔보면서 "라이브러리가
 정확히 무엇을 대신 처리해주는지" 비교해보는 것과, Kafka Streams로 실시간 집계/모니터링을 붙여보는 것이다.
@@ -259,3 +394,19 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
   더 명시적으로 처리됐을 것). 멱등성 처리는 별도로 해결됐고, 이 항목은 아직 미해결입니다.
 - payment-service의 결제 성공/실패는 실제 PG 연동이 아니라 금액 임계값 기반의 단순 시뮬레이션
   입니다 (`app.payment.fail-above-amount`).
+- ~~llm-service의 자연어 추출은 실제 LLM이 아니라 정규식/키워드 기반 mock입니다.~~ **해결됨**:
+  기본값이 로컬 Ollama(`gemma3:4b`)를 실제로 호출하는 `OllamaLlmClient`로 바뀌었습니다
+  (`app.llm.provider=ollama`). 정규식 기반 `MockLlmClient`는 API 키/Ollama 없이 구조만 볼 때
+  쓰는 대안(`app.llm.provider=mock`)으로 남아있는데, 명시적 날짜나 "강남/해운대/서울/부산" 같은
+  몇 개 키워드만 인식하고 "왕십리"처럼 목록에 없는 지명은 인식하지 못합니다 — 이게 정확히
+  실제 LLM(지리 지식으로 임의의 지명을 이해)이 필요한 이유이기도 합니다.
+- 지점 매칭(`BranchMatcher`)은 동 이름이 겹치는 경우(예: "송정동"은 서울 성동구에도, 부산
+  해운대구에도 있습니다) 문맥을 보지 않고 법정동코드가 더 작은 쪽(대략 서울이 먼저)을 기계적으로
+  고릅니다. 이미 알고 있는 시/도 정보를 활용해 disambiguate하는 건 아직 하지 않습니다.
+- "코엑스", "롯데월드"처럼 동 이름이 아닌 랜드마크명은 인식하지 못합니다. 임베딩 기반 의미 검색으로
+  풀어보려고 시도했지만(위 학습 회고 참고), 검증해보니 로컬 LLM/임베딩 모델 둘 다 이런 구체적인
+  지리 지식을 갖고 있지 않아 포기했습니다. 정확히 풀려면 카카오/네이버 지도 같은 실제 장소 검색
+  API 연동이 필요할 것으로 보입니다(아직 미착수).
+- 예약의 `model`(차량 모델명)은 정보성 필드일 뿐 재고 매칭에는 쓰이지 않습니다. 실제로 지점마다
+  모델별 재고를 관리하려면 1,523개 지점 × 모델 카탈로그를 새로 시딩해야 해서 범위를 의도적으로
+  좁혔습니다.

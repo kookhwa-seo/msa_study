@@ -1,0 +1,23 @@
+server:
+  port: 8086
+
+spring:
+  application:
+    name: llm-service
+
+app:
+  llm:
+    # mock: 정규식/키워드 기반 흉내. ollama: 로컬 Ollama(OpenAI 호환 API) 호출.
+    # LlmClient를 구현하는 새 provider를 추가하려면 이 값과 매칭되는
+    # @ConditionalOnProperty를 가진 Bean을 하나 더 등록하면 된다.
+    provider: ollama
+    ollama:
+      base-url: http://localhost:11434
+      model: gemma3:4b
+      timeout-seconds: 30
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

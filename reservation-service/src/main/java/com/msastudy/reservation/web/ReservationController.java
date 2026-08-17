@@ -4,6 +4,7 @@ import com.msastudy.reservation.domain.Reservation;
 import com.msastudy.reservation.repository.ReservationRepository;
 import com.msastudy.reservation.service.ReservationService;
 import jakarta.validation.Valid;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -12,6 +13,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -34,5 +36,13 @@ public class ReservationController {
         Reservation reservation = reservationRepository.findById(reservationId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "존재하지 않는 예약: " + reservationId));
         return ReservationResponse.from(reservation);
+    }
+
+    @GetMapping
+    public List<ReservationResponse> list(@RequestParam(required = false) String customerId) {
+        List<Reservation> reservations = customerId == null
+                ? reservationRepository.findAllByOrderByCreatedAtDesc()
+                : reservationRepository.findAllByCustomerIdOrderByCreatedAtDesc(customerId);
+        return reservations.stream().map(ReservationResponse::from).toList();
     }
 }
