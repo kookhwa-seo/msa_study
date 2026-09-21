@@ -20,8 +20,13 @@ spring:
         # payment는 Kafka 컨슈머 전용이라 REST API가 없지만 actuator는 떠 있어서 헬스체크만
         # 라우팅한다. notification-service는 starter-web조차 없는 순수 컨슈머라 라우팅할 HTTP
         # 대상 자체가 없어 제외한다.
+        #
+        # reservation-api만 lb://<서비스명>으로 Eureka 기반 디스커버리 라우팅을 쓴다(서비스
+        # 레지스트리 실습 대상). 나머지 라우트는 지금도 인스턴스가 항상 1개뿐이라 고정 주소로도
+        # 충분해서 그대로 뒀다 - 인스턴스가 여러 개가 될 때만 디스커버리가 실제로 필요해진다
+        # (docs/service-registry-lab.md 참고).
         - id: reservation-api
-          uri: http://localhost:8081
+          uri: lb://reservation-service
           predicates:
             - Path=/api/reservations/**
         - id: vehicle-branches-api
@@ -50,6 +55,15 @@ spring:
             - Path=/services/payment/**
           filters:
             - StripPrefix=2
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+    # 게이트웨이 자신은 아무도 디스커버리로 찾아서 호출하지 않는다(브라우저가 고정 포트 8085로
+    # 직접 접근) - 레지스트리에 등록될 필요 없이 조회만 하면 된다.
+    register-with-eureka: false
+    fetch-registry: true
 
 management:
   endpoints:

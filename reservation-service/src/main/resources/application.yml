@@ -32,6 +32,19 @@ management:
       exposure:
         include: health,info
 
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    # 같은 서비스 인스턴스를 여러 개(포트만 다르게) 띄울 때 Eureka 대시보드/API에서 서로
+    # 구분되도록 포트를 인스턴스 ID에 포함시킨다. 기본값은 호스트명만 써서 같은 머신에서 여러
+    # 인스턴스를 띄우면 서로 구분이 안 된다.
+    instance-id: ${spring.application.name}:${server.port}
+    # 로컬 실습용: 장애 감지를 몇 분씩 기다리지 않도록 하트비트/만료 주기를 짧게 줄인다.
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 10
+
 # reservationId(Saga 상관관계 ID)를 MDC에서 읽어 로그 레벨 옆에 노출한다.
 # Zipkin 없이도, 이 값으로 여러 서비스의 로그를 grep해서 하나의 Saga 흐름을 추적할 수 있다.
 logging:

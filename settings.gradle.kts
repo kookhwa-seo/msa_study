@@ -7,5 +7,9 @@ include(
     "payment-service",
     "notification-service",
     "api-gateway",
-    "llm-service"
+    "llm-service",
+    "eureka-server",
+    "kafka-lab",
+    "deadlock-lab",
+    "vthread-lab"
 )

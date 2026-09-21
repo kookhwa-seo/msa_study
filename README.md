@@ -9,29 +9,44 @@
 ## 아키텍처
 
 ```
-[Reservation] --ReservationCreated--> [Vehicle] --VehicleAssigned--> [Payment] --PaymentCompleted--> [Reservation]
-   (Outbox)         |                  (Outbox)         |              (Outbox)         |
-                    |                                   |                               └─(알림)──> [Notification]
-                    └--VehicleAssignFailed--> [Reservation: CANCELLED]                  ┌─(알림)──> [Notification]
-                                                                        PaymentFailed────┘
-                                                                              |
-                                                            [Vehicle: 재고 반환(보상)] --VehicleReleased--> [Reservation: CANCELLED]
+[Reservation] --ReservationCreated--> [Payment: 가승인] --PaymentAuthorized--> [Vehicle: 자동 배정]
+   (Outbox)                              (Outbox)  |                             (Outbox)   |
+                                                   |                                        |
+                        PaymentAuthFailed ─────────┘                                        |
+                                 └──> [Reservation: CANCELLED]                              |
+                                                                                            |
+[Reservation] <--PaymentCompleted-- [Payment: 매입(capture)] <----VehicleAssigned-----------┤
+   CONFIRMED                                                                                |
+                                                                                            |
+[Reservation: CANCELLED] <--PaymentVoided-- [Payment: 승인 취소(void)] <--VehicleAssignFailed┘
+
+(매입 시점에 가승인이 만료돼 실패하면)
+[Payment] --PaymentFailed--> [Vehicle: 재고 반환(보상)] --VehicleReleased--> [Reservation: CANCELLED]
 ```
 
 - **Database per Service**: 서비스별 Postgres 인스턴스 분리 (reservation-db / vehicle-db / payment-db).
   notification-service는 DB 없음.
 - **Choreography Saga**: 중앙 오케스트레이터 없이 각 서비스가 이벤트를 구독해 자기 몫을 처리하고
-  다음 이벤트를 발행. 결제 실패 보상은 "실패 이벤트에 직접 반응"이 아니라 "보상을 수행한 서비스가
+  다음 이벤트를 발행. 보상은 "실패 이벤트에 직접 반응"이 아니라 "보상을 수행한 서비스가
   보상 완료 이벤트를 발행 → 그걸 받은 서비스가 최종 처리"하는 흐름으로 구현했습니다
-  (`PaymentFailed` → vehicle-service가 재고 반환 → `VehicleReleased` → reservation-service가 최종 취소).
+  (재고 부족: `VehicleAssignFailed` → payment-service가 가승인 취소 → `PaymentVoided` →
+  reservation-service가 최종 취소 / 매입 실패: `PaymentFailed` → vehicle-service가 재고 반환 →
+  `VehicleReleased` → reservation-service가 최종 취소).
+- **가승인(authorize) → 배정 → 매입(capture)**: 결제 안 된 주문이 차량을 점유하지 않도록 결제
+  서비스가 Saga의 첫 단계입니다. 가승인은 카드 한도만 보류할 뿐 돈이 움직이지 않으므로, 재고가
+  없을 때의 보상이 환불이 아니라 보류 해제(void) 한 번으로 끝납니다. 가승인 유효기간
+  (`app.payment.authorization-ttl`, 기본 30분)이 지난 뒤 매입하려 하면 `PaymentFailed`
+  (`AUTHORIZATION_EXPIRED`)로 실패하고 배정된 차량이 반환됩니다.
 - **Outbox 패턴**: 비즈니스 데이터 저장 + 이벤트 저장을 하나의 DB 트랜잭션으로 묶고, 별도
   폴링 퍼블리셔(`@Scheduled`, 2초 주기)가 Kafka로 발행. Debezium 같은 CDC 도구 없이 직접
   구현했습니다 (학습 목적 — 왜 Outbox가 필요한지 코드로 확인).
 - 각 서비스가 자기 `OutboxEvent` 엔티티/퍼블리셔를 독립적으로 소유합니다 (`common` 모듈에
   추상화하지 않음).
-- payment-service는 reservation-service를 동기 호출하지 않고, `ReservationCreated`를 구독해
-  결제에 필요한 금액 정보만 로컬에 복사해둡니다(`ReservationSnapshot`) — Choreography Saga에서
-  "필요한 데이터는 이벤트로 전달받아 로컬에 보관" 패턴을 보여주는 지점입니다.
+- 각 단계는 다음 단계에 필요한 데이터를 이벤트에 실어 보냅니다. payment-service는
+  `ReservationCreated`의 금액으로 가승인하고, 차량 배정에 필요한 `vehicleType`/`branchId`를
+  `PaymentAuthorized`에 그대로 담아 보냅니다. vehicle-service는 `reservation-events`를 구독하지
+  않고 reservation-service를 조회하지도 않으며, 서로 다른 토픽의 이벤트 도착 순서에 기대는 로컬
+  스냅샷도 두지 않습니다 — 이벤트 순서가 토픽 간 인과 관계로 강제됩니다.
 - **프런트엔드 / LLM 어시스턴트**: React 프런트엔드는 API Gateway(8085) 하나만 알면 되고,
   브라우저는 각 서비스 포트를 직접 호출하지 않습니다. `llm-service`는 Saga에 참여하지 않는
   무상태 REST 서비스로, 자연어 메시지를 예약 필드로 변환해줄 뿐 예약을 직접 생성하지 않습니다
@@ -44,14 +59,15 @@
 |---|---|---|---|
 | api-gateway | 8085 | 단일 진입점, `/api/reservations`·`/api/branches`·`/api/chat` 라우팅 + CORS | 구현됨 |
 | reservation-service | 8081 | 예약 생성/조회, Saga 시작점 | 구현됨 |
-| vehicle-service | 8082 | 차량 재고/배정, 결제 실패 보상(재고 반환), 지점(법정동) 카탈로그 조회 API | 구현됨 |
-| payment-service | 8083 | 결제 처리(금액 기준 성공/실패 시뮬레이션) | 구현됨 |
+| vehicle-service | 8082 | 차량 재고/배정(가승인 성공 후), 매입 실패 보상(재고 반환), 지점(법정동) 카탈로그 조회 API | 구현됨 |
+| payment-service | 8083 | 가승인/매입/승인 취소(금액 기준 성공/실패 시뮬레이션) | 구현됨 |
 | notification-service | 8084 | 알림(로그 시뮬레이션) | 구현됨 |
 | llm-service | 8086 | 자연어 예약 요청 → 구조화된 필드 추출(로컬 Ollama LLM, mock으로도 전환 가능) | 구현됨 |
 | frontend | 5173 (dev) | React 대시보드 + 예약 어시스턴트 UI | 구현됨 |
 
-예약 상태 전이: `PENDING` → (배정 성공) `PAYMENT_PENDING` → (결제 성공) `CONFIRMED`,
-또는 `PENDING`/`PAYMENT_PENDING` → (배정 실패 또는 결제 실패 보상 완료) `CANCELLED`.
+예약 상태 전이: `PENDING` → (가승인 성공 + 배정 성공) `PAYMENT_PENDING`(배정 완료, 매입 대기) →
+(매입 성공) `CONFIRMED`, 또는 `PENDING` → (가승인 거절 / 재고 부족 보상 완료) `CANCELLED`,
+`PAYMENT_PENDING` → (매입 실패 보상 완료) `CANCELLED`.
 자세한 이벤트/상태 다이어그램은 [`docs/event-schema.md`](./docs/event-schema.md) 참고.
 
 ### 지점(법정동) 데이터
@@ -148,7 +164,7 @@ curl http://localhost:8086/actuator/health   # llm-service
 
 vehicle-service는 최초 기동 시 8개 광역시 1,523개 법정동 전체에 차종별 재고를 자동으로
 시딩합니다(위 "지점(법정동) 데이터" 참고). payment-service는 `app.payment.fail-above-amount`
-(기본 1,000,000원)를 초과하는 예약을 결제 실패로 시뮬레이션합니다
+(기본 1,000,000원)를 초과하는 예약을 가승인 실패로 시뮬레이션합니다
 (`payment-service/src/main/resources/application.yml`).
 
 ### 3. 프런트엔드 실행
@@ -202,14 +218,14 @@ curl -X POST http://localhost:8081/api/reservations \
 ```
 
 `branchId: 1168010500`는 서울특별시 강남구 삼성동입니다. 응답의 `reservationId`로 상태를 조회하면
-수 초 내(outbox 폴링 주기 2초 x 왕복 홉 수) `PENDING` → `PAYMENT_PENDING`(차량 배정 완료, 결제
-대기) → `CONFIRMED`(결제 완료)로 바뀝니다.
+수 초 내(outbox 폴링 주기 2초 x 왕복 홉 수) `PENDING` → `PAYMENT_PENDING`(가승인 + 차량 배정
+완료, 매입 대기) → `CONFIRMED`(매입 완료)로 바뀝니다.
 
 ```bash
 curl http://localhost:8081/api/reservations/{reservationId}
 ```
 
-### 2. 재고 없음 → 즉시 취소
+### 2. 재고 없음 → 가승인 취소 후 최종 취소
 
 ```bash
 curl -X POST http://localhost:8081/api/reservations \
@@ -226,14 +242,15 @@ curl -X POST http://localhost:8081/api/reservations \
 ```
 
 `branchId: 1111010100`(서울특별시 종로구 청운동)은 고정 시드로 시딩했을 때 SUV 재고가 0으로
-나오는 지점입니다. vehicle-service가 재고를 찾지 못해 `VehicleAssignFailed`를 발행하고,
-reservation-service가 이를 소비해 `PENDING` → `CANCELLED`로 전환하며 `ReservationCancelled`
+나오는 지점입니다. 가승인은 성공하지만 vehicle-service가 재고를 찾지 못해 `VehicleAssignFailed`를
+발행하고, payment-service가 가승인을 취소(void)하며 `PaymentVoided`를 발행합니다. reservation-service가
+이 보상 완료 이벤트를 소비해 `PENDING` → `CANCELLED`로 전환하며 `ReservationCancelled`
 이벤트를 다시 발행합니다. (다른 지점/차종 조합도 재고가 0일 수 있습니다 — vehicle-db에서
 직접 확인하거나 `/api/branches`와 대시보드 목록을 같이 보면 재현하기 쉽습니다.)
 
-### 3. 재고 있음 + 결제 실패(금액 초과) → 배정 취소 보상 후 최종 취소
+### 3. 가승인 실패(금액 초과) → 배정 시도 없이 즉시 취소
 
-`totalAmount`가 `app.payment.fail-above-amount`(기본 1,000,000)를 넘으면 결제가 실패합니다.
+`totalAmount`가 `app.payment.fail-above-amount`(기본 1,000,000)를 넘으면 가승인이 거절됩니다.
 
 ```bash
 curl -X POST http://localhost:8081/api/reservations \
@@ -249,10 +266,13 @@ curl -X POST http://localhost:8081/api/reservations \
   }'
 ```
 
-흐름: `PENDING` → `PAYMENT_PENDING`(배정 성공) → payment-service가 `PaymentFailed` 발행 →
-vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleReleased` 발행 → reservation-service가
-`CANCELLED`로 최종 전환. 배정됐던 차량이 다시 `AVAILABLE`로 돌아온 것도 vehicle-db에서 확인할
-수 있습니다.
+흐름: payment-service가 `PaymentAuthFailed` 발행 → reservation-service가 `PENDING` →
+`CANCELLED`로 전환. 가승인이 거절됐으니 차량 배정은 시도조차 하지 않으므로 vehicle-db의 재고에는
+아무 변화가 없습니다(이전 구조에서는 배정 후 결제 실패 → 재고 반환 보상이 필요했음).
+
+매입 단계에서 가승인이 만료돼 실패하는 경우(`PaymentFailed` → `VehicleReleased` 보상)는
+`app.payment.authorization-ttl`을 아주 짧게(예: `PT0S`) 설정하고 예약하면 재현할 수 있습니다.
+이때는 배정됐던 차량이 다시 `AVAILABLE`로 돌아온 것을 vehicle-db에서 확인할 수 있습니다.
 
 ## 테스트
 
@@ -261,8 +281,8 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
 ```
 
 `ReservationServiceTest`, `VehicleAssignmentServiceTest`, `PaymentServiceTest`가 각 서비스의
-핵심 로직(예약 생성/배정/결제 시도 시 Outbox 저장, 성공/실패에 따른 상태 전이와 Outbox 이벤트
-내용, 결제 실패 시 차량 재고 반환)을 검증합니다.
+핵심 로직(예약 생성/가승인/배정/매입 시 Outbox 저장, 성공/실패에 따른 상태 전이와 Outbox 이벤트
+내용, 가승인 취소(void), 매입 실패 시 차량 재고 반환)을 검증합니다.
 
 ## 진행 로드맵
 
@@ -288,8 +308,9 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
 - **MSA 서비스 분리 (Database per Service)** — 왜: 서비스를 나눈다는 말은 알아도 "DB까지 왜
   분리해야 하는지", 동기 호출 없이 서비스가 필요한 데이터를 어떻게 확보하는지 감이 없었다.
   배운 것: payment-service가 reservation-service를 REST로 호출하는 대신 `ReservationCreated`를
-  구독해서 결제에 필요한 최소한의 정보(`ReservationSnapshot`)만 로컬에 복제해두는 패턴을 직접
-  구현해봄으로써, "서비스 간 결합을 없앤다"는 게 실제로 어떤 트레이드오프(데이터 중복 vs 독립성)인지
+  구독해서 결제에 필요한 최소한의 정보(`ReservationSnapshot`)만 로컬에 복제해두는 패턴을 처음
+  구현해봤고(이후 가승인 구조로 바꾸면서 스냅샷 대신 이벤트에 다음 단계 데이터를 실어 보내는
+  방식으로 대체), 이를 통해, "서비스 간 결합을 없앤다"는 게 실제로 어떤 트레이드오프(데이터 중복 vs 독립성)인지
   이해했다.
 - **Kafka 파티션 키와 순서 보장** — 왜: Kafka가 순서를 보장한다는 걸 개념으로만 알고 있었고,
   실제로 무엇을 key로 잡아야 하는지 감이 없었다. 배운 것: 같은 예약(Saga)에 속한 이벤트가
@@ -306,7 +327,11 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
   "실패를 발생시킨 이벤트"가 아니라 "보상을 실제로 수행해야 하는 서비스"라는 원칙을 실제로
   적용해봤다 — `PaymentFailed`는 vehicle-service가 구독해 배정을 취소(보상)하고, 그 결과인
   `VehicleReleased`를 reservation-service가 구독해서 최종 취소한다. reservation-service가
-  `PaymentFailed`를 직접 구독하지 않는 이유를 설계하면서 명확해졌다.
+  `PaymentFailed`를 직접 구독하지 않는 이유를 설계하면서 명확해졌다. 이후 "결제 안 된 주문이
+  차량을 잡으면 안 된다"는 지적에서 출발해 순서를 가승인 → 배정 → 매입으로 바꿨다. 되돌리기
+  쉬운 단계(가승인 보류)를 앞에, 되돌리기 어려운 단계(실제 청구)를 뒤에 두는 것이 Saga 순서
+  설계의 원칙이라는 점과, 이벤트에 다음 단계 데이터를 실어 보내면 토픽 간 도착 순서 의존이
+  사라진다는 점을 확인했다.
 - **컨슈머 멱등성 (at-least-once 전달)** — 왜: Kafka가 최소 한 번 전달을 보장한다는 건 알았지만,
   중복 수신이 실제로 어떤 문제(중복 배정, 중복 결제)를 일으키는지, 어떻게 막는지 직접 보고 싶었다.
   배운 것: 서비스마다 `ProcessedEvent`(eventId 처리 원장)를 두고, 이미 처리한 `eventId`면 비즈니스
@@ -372,6 +397,215 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
 다음 학습 예정(Step 6, 선택)은 지금 직접 만든 폴링 퍼블리셔를 Debezium CDC로 바꿔보면서 "라이브러리가
 정확히 무엇을 대신 처리해주는지" 비교해보는 것과, Kafka Streams로 실시간 집계/모니터링을 붙여보는 것이다.
 
+## 대용량 트래픽 안정성 실습
+
+기존 로드맵(1~9단계)이 "MSA를 어떻게 나누고 이벤트로 연결하는가"에 집중했다면, 이 단계는 그렇게
+나눈 서비스들이 **트래픽이 커져도 안정적으로 버티는가**를 다룬다. 각 항목은 실패/경합 상황을
+일부러 재현해서 원인을 로그·지표로 확인한 다음 고치는 순서로 진행한다.
+
+- [x] 1. Kafka 순서 보장 실습 — 파티션 2개 이상에서 순서 깨지는 케이스 재현 + 로그로 원인 확인
+- [x] 2. 동시 결제 요청 방어 — reservationId unique constraint + 예외 캐치
+- [x] 3. 데드락 재현·방지 — 반대 순서로 리소스를 잠그는 코드로 재현 → 락 순서 통일로 해결
+- [x] 4. 오토스케일링 실습 — 로컬 k8s(HPA) + k6 부하 테스트로 스케일 아웃/인 관찰
+- [x] 5. 가상 스레드(JDK21+) 벤치마크 — 플랫폼 스레드 대비 처리량 비교
+- [x] 6. 서비스 레지스트리(Eureka) 도입 — 등록/헬스체크 기반 해제/클라이언트 사이드
+  디스커버리/로드밸런싱, API Gateway 연동
+
+### 1. Kafka 순서 보장 실습
+
+파티션 3개짜리 토픽에서, 같은 예약(aggregate)의 이벤트를 key 없이 여러 파티션에 흩뿌렸을 때
+실제로 순서가 깨지는 것과, `reservationId`로 key를 고정했을 때(실제 이 프로젝트의 방식) 순서가
+보장되는 것을 순수 `kafka-clients` 기반 랩(`kafka-lab` 모듈)으로 재현했다.
+
+```bash
+docker compose up -d kafka
+./gradlew :kafka-lab:run --args="broken"   # 순서 깨짐 재현
+./gradlew :kafka-lab:run --args="fixed"    # reservationId 방식과 동일 - 순서 보장
+```
+
+실행 로그 발췌(20개 이벤트, "처리 완료 순서"가 "전송 순서"와 얼마나 어긋나는지):
+
+```
+[broken] 처리 완료 순서: 0 1 2 3 5 4 6 7 8 9 12 10 11 13 14 17 15 18 16 19  (역전 4건)
+[fixed]  처리 완료 순서: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19  (역전 0건)
+```
+
+Kafka는 **토픽 전체가 아니라 파티션 내부의 순서만** 보장한다. 파티션을 늘려 처리량을 올리는
+순간부터 "같은 예약 건은 항상 같은 key로 보낸다"는 규칙을 지키지 않으면 예외 없이 조용히
+순서가 깨진다 — 이 프로젝트의 Saga 이벤트가 처음부터 `reservationId`를 key로 고정해온 이유를
+반증으로 확인한 것이다. 상세 설계와 전체 로그는 `docs/kafka-ordering-lab.md` 참고.
+
+**주의**: 이 랩은 토픽 하나 안에서만 key를 바꿔본 것이다. "`ReservationCreated`와
+`VehicleAssigned`처럼 서로 다른 이벤트를 같은 key로 보내면 순서가 보장되나요?"라는 질문에는
+"토픽이 같으면 맞고, 다르면 아니다"가 정답이다 — 실제로 이 둘은 서로 다른 토픽
+(`reservation-events` vs `vehicle-events`)에 쌓이고, Kafka의 순서 보장은 토픽을 넘어가지
+않는다. 이 프로젝트에서 그 순서가 실제로 안전한 이유는 Kafka가 아니라 **Choreography Saga의
+인과관계**(다음 이벤트는 항상 이전 이벤트를 처리한 결과로만 발행된다) 때문이다. 자세한 설명은
+`docs/kafka-ordering-lab.md`의 "이 랩이 다루지 않는 부분" 참고.
+
+### 2. 동시 결제 요청 방어
+
+같은 예약(`reservationId`)에 대한 가승인 요청이 동시에 여러 번 들어와도(중복 이벤트 재전달,
+경합 등) 결제 건이 두 번 생기지 않도록 두 겹으로 막는다 (`PaymentService.handleReservationCreated`,
+`Payment.reservation_id`에 걸린 `uk_payment_reservation_id` unique constraint):
+
+1. `existsByReservationId` 사전 확인 — 순차적으로 들어온 중복을 예외 없이 조용히 스킵.
+2. DB unique constraint — 1번 확인과 실제 저장 사이에 다른 트랜잭션이 끼어드는 진짜 동시 요청을
+   DB가 막는다. `DataIntegrityViolationException`을 캐치해서 "그 예약의 결제가 실제로 존재하면
+   동시 처리로 인한 중복"으로 판단해 무시하고, 아니면 다른 무결성 오류이므로 그대로 던져
+   재시도/DLT로 넘긴다. `@Transactional` 대신 `TransactionTemplate`을 쓴 이유는 유니크 위반이
+   보통 커밋 시점에 터지는데, 트랜잭션 안에서 잡으면 이미 rollback-only라 아무것도 못 하기
+   때문 — 트랜잭션 경계를 메서드 안쪽으로 좁혀서 롤백이 끝난 바깥에서 처리한다.
+
+**왜 비관적 락(`SELECT ... FOR UPDATE`)이 아니라 unique constraint인가**: 비관적 락은 "이미
+존재하는 행"에만 걸 수 있다. 이 예약은 **신규 주문이라 결제 행 자체가 아직 없는 상태**라서,
+비관적 락으로는 애초에 잠글 대상이 없다. Unique constraint는 행을 잠그는 게 아니라 **INSERT가
+커밋되는 순간 인덱스 자체가 중복을 막아주는** 방식이라 이 문제를 겪지 않는다 — 두 트랜잭션이
+동시에 같은 reservationId로 INSERT를 시도해도, 둘 다 "잠글 기존 행"이 없었던 것과 무관하게
+DB가 하나만 통과시킨다. (신규 행 문제의 또 다른 정답은 행이 아니라 **식별자 자체("order:
+{orderId}" 같은 키)를 잠그는 앱 레벨/분산락**이다 — Redisson 같은 도구가 여기서는 진짜
+쓸모가 있다. 다만 이 프로젝트는 이미 unique constraint로 충분해서 그 경로까지 가지 않았다.)
+
+원래는 Redisson 분산락과 비교 구현까지 계획했지만, 이 문제(하나의 테이블에 유니크 키로 표현
+가능한 단순 중복 방지)는 DB unique constraint만으로 이미 정확하고, 인스턴스가 몇 개로 늘어나도
+(Kafka key가 reservationId라 같은 예약의 이벤트는 항상 같은 파티션 → 같은 컨슈머 인스턴스로만
+가기도 하고, 설사 여러 인스턴스가 동시에 써도 Postgres 자체가 단일 심판 역할을 한다) 안전하다는
+결론에 도달해서 Redisson 도입은 보류했다. 분산락은 "DB 하나의 유니크 키로 표현 안 되는 경합"
+(여러 테이블/서비스에 걸친 작업, 비싼 외부 호출을 애초에 중복 실행하고 싶지 않은 경우)에
+필요한 도구이고, 지금 여기 억지로 얹으면 오히려 Redis 의존성·락 TTL 튜닝 같은 복잡도만 늘어난다
+— "언제 안 써도 되는지"를 판단한 것 자체가 이 항목의 결론이다.
+
+### 3. 데드락 재현·방지
+
+이 프로젝트가 실제로 쓰는 vehicle-db(Postgres)의 `vehicle` 테이블에서, 두 트랜잭션이 같은
+행 2개(차량A/차량B)를 `SELECT ... FOR UPDATE`로 잠그되 순서를 반대로 하면 실제로 무슨 일이
+일어나는지 순수 JDBC 기반 랩(`deadlock-lab` 모듈)으로 재현했다.
+
+```bash
+docker compose up -d vehicle-db
+./gradlew :deadlock-lab:run --args="broken"   # 반대 순서 - 데드락 재현
+./gradlew :deadlock-lab:run --args="fixed"    # 같은 순서 - 데드락 없음
+```
+
+실행 로그 발췌:
+
+```
+[broken] tx-1: A→B 순서, tx-2: B→A 순서로 잠금
+  tx-1 2차 락 획득: B (1003ms 대기)  |  tx-1 커밋 완료
+  tx-2: Postgres가 데드락을 탐지해서 강제 중단 (SQLState 40P01, "deadlock detected")
+  전체 소요 시간: 1038ms
+
+[fixed]  tx-1, tx-2 모두 A→B 순서로 잠금
+  tx-1 커밋 완료 → tx-2가 그 뒤를 이어 바로 커밋 완료 (둘 다 성공)
+  전체 소요 시간: 25ms
+```
+
+Postgres는 데드락을 스스로 탐지해서(기본 `deadlock_timeout` 1초) 한쪽 트랜잭션을 강제로
+롤백시키는 안전장치가 있지만, 그 탐지에 걸리는 시간만큼 응답이 느려지고(1038ms vs 25ms) 롤백된
+트랜잭션은 애플리케이션이 재시도하거나 실패로 처리해야 한다. 해결책은 별도 락 라이브러리가
+아니라 **"여러 행을 잠글 때는 항상 정해진 순서로 잠근다"는 규칙 하나**다 — fixed 모드가
+보여주듯, 이 규칙만 지키면 순환 대기(circular wait) 자체가 성립할 수 없다. 상세 설계와 전체
+로그는 `docs/deadlock-lab.md` 참고.
+
+### 4. 오토스케일링 실습
+
+로컬 kind 클러스터에 `reservation-service`를 실제로 컨테이너화해서 배포하고, HPA(CPU 사용률
+50% 목표, 1~5개 파드)를 걸어둔 다음 k6로 부하를 줘서 스케일 아웃/인을 직접 관찰했다.
+
+```bash
+kind create cluster --name msa-study
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+./gradlew :reservation-service:bootJar
+docker build -t reservation-service:hpa-lab -f reservation-service/Dockerfile reservation-service
+kind load docker-image reservation-service:hpa-lab --name msa-study
+kubectl apply -f infra/k8s/reservation-service/manifests.yaml
+kubectl port-forward svc/reservation-service 18081:8081 &
+k6 run infra/k8s/reservation-service/load-test.js
+```
+
+실제 `kubectl get hpa` 타임라인 발췌 (40 VU 부하를 2분간 유지):
+
+```
+17:27:26  cpu:  20%/50%   pods=1     <- 부하 시작 전
+17:28:12  cpu: 228%/50%   pods=3     <- 목표치 초과, 즉시 스케일 아웃
+17:28:27  cpu: 253%/50%   pods=5     <- 최대치 도달 (1->5, 약 20초)
+17:29:08  cpu:  49%/50%   pods=5     <- 목표치 근처로 안정화
+17:29:54  cpu:  42%/50%   pods=5->4  <- 부하 종료, 스케일 인 시작
+17:31:41  cpu:  10%/50%   pods=2->1
+17:32:07  cpu:  10%/50%   pods=1     <- 원래대로 복귀 (5->1, 약 2분 13초)
+```
+
+k6는 56,415건을 실패 0%로 처리했다(평균 6.28ms, 313 req/s) — HPA는 "요청이 실패/지연되는 걸
+보고" 반응하는 게 아니라 **파드의 리소스 사용률을 보고** 반응한다는 걸 보여준다. **스케일
+아웃은 빠르고(20초) 스케일 인은 느린(2분 13초) 게 우연이 아니라 의도적으로 다르게 설정한
+정책**(`behavior.scaleUp`/`scaleDown`)이다 — 늘릴 땐 빠르게 반응하고, 줄일 땐 신중하게 반응해서
+부하가 잠깐 튀었다 가라앉을 때마다 파드를 늘렸다 줄였다 반복하는 "플래핑"을 피한다. 상세 설계와
+전체 로그는 `docs/autoscaling-lab.md` 참고.
+
+### 5. 가상 스레드(JDK21+) 벤치마크
+
+플랫폼 스레드 풀(크기 200 — Spring Boot 내장 Tomcat 기본값과 동일)과 가상 스레드(작업당 1개)로
+같은 워크로드를 돌려서 비교했다 (`vthread-lab` 모듈, Spring 없이 순수 `java.util.concurrent`).
+
+```bash
+./gradlew :vthread-lab:run
+```
+
+실제 실행 결과 (10코어 머신):
+
+```
+I/O-bound (작업 10,000개, 각 50ms 블로킹 sleep)
+  플랫폼 스레드: 2,691ms   가상 스레드: 97ms    -> 27.7배
+
+CPU-bound (작업 2,000개, 각 3만 이하 소수 개수 세기)
+  플랫폼 스레드:   162ms   가상 스레드: 148ms   -> 1.09배 (거의 차이 없음)
+```
+
+가상 스레드는 "I/O로 기다리는 동안 OS 스레드를 점유하지 않는다"는 게 핵심이지, 연산 자체를
+빠르게 해주는 게 아니다. I/O-bound(블로킹 대기가 있는 작업)에서는 스레드 풀 크기라는 병목이
+사라져서 27.7배 차이가 나지만, CPU-bound(온전히 계산만 하는 작업)에서는 어느 쪽이든 물리
+코어 수 이상 동시에 실행될 수 없어서 차이가 거의 없다. 이 프로젝트의 서비스들(REST API +
+JPA/JDBC 호출)은 전형적인 I/O-bound 워크로드라 이 이점을 받을 수 있는 후보지만, 지금 트래픽
+규모에서는 기본 플랫폼 스레드 풀로도 병목이 없다. 상세 설계와 원인 분석은 `docs/vthread-lab.md`
+참고.
+
+### 6. 서비스 레지스트리(Eureka)
+
+이 프로젝트에서 서비스 디스커버리가 필요한 지점은 딱 하나, **API Gateway → reservation-service**
+뿐이다(Saga 내부는 여전히 Kafka로만 통신). `eureka-server`(신규 모듈)를 띄우고,
+reservation-service를 **인스턴스 2개(포트 8081/8091)** 로 띄운 다음, api-gateway의 라우팅을
+고정 주소(`http://localhost:8081`)에서 `lb://reservation-service`(Eureka 조회 + 로드밸런싱)로
+바꿔서 등록/디스커버리/로드밸런싱/장애 시 등록 해제를 전부 직접 확인했다.
+
+```bash
+./gradlew :eureka-server:bootRun &
+./gradlew :reservation-service:bootRun &                    # 인스턴스 1: 8081
+SERVER_PORT=8091 ./gradlew :reservation-service:bootRun &   # 인스턴스 2: 8091
+./gradlew :api-gateway:bootRun &
+```
+
+로드밸런싱 확인 (`X-Instance-Port` 응답 헤더로 실제 처리한 인스턴스 확인, 10회 연속 호출):
+
+```
+8091 8081 8091 8081 8091 8081 8091 8081 8091 8081   <- 정확히 라운드로빈
+```
+
+8091 인스턴스를 `kill -9`로 강제 종료한 뒤 실제로 관찰한 타임라인:
+
+```
+22:39:13  kill -9로 8091 강제 종료
+22:39:32  Eureka 레지스트리에서 등록 해제 (19초 - 하트비트 만료)
+22:40:52  게이트웨이는 여전히 죽은 8091로 절반씩 라우팅 중 (Connection refused)
+22:41:24  이 시점부터 전부 8081(생존 인스턴스)로만 라우팅 - 총 131초 소요
+```
+
+**레지스트리에서 지워지는 것(19초)과 호출하는 쪽이 그걸 실제로 반영하는 것(131초) 사이에
+큰 간극이 있다** — 게이트웨이 안에 Eureka 클라이언트 레지스트리 캐시, Spring Cloud
+LoadBalancer의 인스턴스 목록 캐시, Eureka 서버 자체의 응답 캐시까지 여러 겹이 있기 때문이다.
+"등록 해제됐으니 트래픽이 바로 끊기겠지"라고 가정하면 안 된다는 걸 숫자로 직접 확인했다 —
+실무에서 재시도/서킷 브레이커를 같이 두는 이유이기도 하다. 상세 설계와 전체 타임라인은
+`docs/service-registry-lab.md` 참고.
+
 ## 알려진 한계 (학습 진행에 따라 다룰 예정)
 
 - ~~Kafka는 at-least-once 전달이라 컨슈머가 같은 이벤트를 중복 수신할 수 있는데, 아직 멱등성
@@ -392,8 +626,14 @@ vehicle-service가 배정했던 차량을 재고로 되돌리고 `VehicleRelease
   재현: 재시작 전 남아있던 오래된 이벤트가 재생되면서 이미 `CONFIRMED`였던 예약이 뒤늦게
   `CANCELLED`로 정정된 사례가 있었음 — 결과적으로는 올바른 최종 상태였지만, 상태 가드가 있었다면
   더 명시적으로 처리됐을 것). 멱등성 처리는 별도로 해결됐고, 이 항목은 아직 미해결입니다.
-- payment-service의 결제 성공/실패는 실제 PG 연동이 아니라 금액 임계값 기반의 단순 시뮬레이션
-  입니다 (`app.payment.fail-above-amount`).
+- payment-service의 가승인 성공/실패는 실제 PG 연동이 아니라 금액 임계값 기반의 단순 시뮬레이션
+  입니다 (`app.payment.fail-above-amount`). 가승인 만료도 매입 시점에 시간만 비교하는 수준이라,
+  매입 요청이 오지 않는 채로 만료되는 경우를 정리하는 스케줄러는 없습니다.
+- (서비스 레지스트리 실습으로 새로 드러난 부분) `OutboxPublisher`는 리더 선출이나 락 없이
+  `@Scheduled`로 단순 폴링만 합니다. reservation-service를 인스턴스 여러 개로 띄우면(6번 실습
+  참고) 각 인스턴스가 같은 reservation-db의 같은 pending 이벤트를 동시에 폴링하다가 같은 이벤트를
+  중복 발행할 수 있습니다 — 컨슈머 쪽 멱등성(`ProcessedEvent`)이 그 중복을 걸러주긴 하지만,
+  발행 쪽 자체의 "한 이벤트는 한 인스턴스만 발행한다"는 보장은 아직 없습니다.
 - ~~llm-service의 자연어 추출은 실제 LLM이 아니라 정규식/키워드 기반 mock입니다.~~ **해결됨**:
   기본값이 로컬 Ollama(`gemma3:4b`)를 실제로 호출하는 `OllamaLlmClient`로 바뀌었습니다
   (`app.llm.provider=ollama`). 정규식 기반 `MockLlmClient`는 API 키/Ollama 없이 구조만 볼 때

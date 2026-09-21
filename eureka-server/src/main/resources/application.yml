@@ -1,0 +1,26 @@
+server:
+  port: 8761
+
+spring:
+  application:
+    name: eureka-server
+
+eureka:
+  client:
+    # 이 서버 자신은 다른 Eureka에 등록되거나 레지스트리를 조회할 필요가 없다 - 단일 레지스트리라
+    # 자기 자신을 클라이언트로도 등록해버리면 불필요한 자기참조 트래픽만 생긴다.
+    register-with-eureka: false
+    fetch-registry: false
+  server:
+    # self-preservation(네트워크 파티션 상황에서 등록된 인스턴스를 함부로 지우지 않는 안전장치)은
+    # 운영 환경에서는 켜두는 게 맞지만, 로컬 단일 노드 실습에서는 "인스턴스를 죽였는데 레지스트리가
+    # 안 지워진다"처럼 헷갈리는 상황만 만든다. eviction 주기도 5초로 줄여서 등록 해제를 몇 분씩
+    # 기다리지 않고 바로 확인할 수 있게 했다.
+    enable-self-preservation: false
+    eviction-interval-timer-in-ms: 5000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

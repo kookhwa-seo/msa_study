@@ -1,0 +1,97 @@
+# 오토스케일링 실습(로컬 kind 클러스터 + HPA)용 매니페스트. 프로덕션 배포용이 아니라
+# "HPA가 실제로 어떻게 동작하는지" k6 부하 테스트로 직접 보기 위한 것 — 그래서 reservation-db/
+# Kafka는 새로 안 띄우고 docker-compose로 이미 떠 있는 걸 host.docker.internal로 그대로 쓴다
+# (kind 노드는 결국 Docker 컨테이너라 Docker Desktop이 host.docker.internal을 자동으로 풀어준다).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reservation-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reservation-service
+  template:
+    metadata:
+      labels:
+        app: reservation-service
+    spec:
+      containers:
+        - name: reservation-service
+          image: reservation-service:hpa-lab
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:postgresql://host.docker.internal:5432/reservation
+            - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+              value: host.docker.internal:9092
+          resources:
+            # request를 낮게 잡아야 HPA CPU 목표치(아래 50%)를 적당한 부하로도 넘길 수 있다.
+            # (Loki push는 host.docker.internal:3100이 아니라 원래 하드코딩된 localhost:3100으로
+            # 시도하다 실패하는데, 비동기 appender라 애플리케이션 동작에는 영향이 없다 - 이 실습
+            # 범위 밖이라 손대지 않았다.)
+            requests:
+              cpu: 200m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reservation-service
+spec:
+  selector:
+    app: reservation-service
+  ports:
+    - port: 8081
+      targetPort: 8081
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: reservation-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: reservation-service
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleDown:
+      # 기본값(5분)은 로컬 실습 한 번 돌리기엔 너무 길어서 30초로 줄였다 - 데모용 튜닝이고
+      # 실제 운영에서는 플래핑(급하게 줄였다 다시 늘리는 것) 방지를 위해 기본값이 더 안전하다.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 15
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
