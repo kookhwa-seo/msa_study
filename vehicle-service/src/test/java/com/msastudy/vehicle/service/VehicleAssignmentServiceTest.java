@@ -8,8 +8,8 @@ import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.msastudy.common.event.PaymentAuthorizedEvent;
 import com.msastudy.common.event.PaymentFailedEvent;
-import com.msastudy.common.event.ReservationCreatedEvent;
 import com.msastudy.common.event.Topics;
 import com.msastudy.common.event.VehicleAssignFailedEvent;
 import com.msastudy.common.event.VehicleAssignedEvent;
@@ -49,18 +49,17 @@ class VehicleAssignmentServiceTest {
     }
 
     @Test
-    void handleReservationCreated_assignsAvailableVehicleAndPublishesAssigned() throws Exception {
+    void handlePaymentAuthorized_assignsAvailableVehicleAndPublishesAssigned() throws Exception {
         Vehicle vehicle = Vehicle.of("V-1", VehicleType.COMPACT, "SEOUL_GANGNAM");
         when(vehicleRepository.findFirstByVehicleTypeAndBranchIdAndStatus(
                 VehicleType.COMPACT, "SEOUL_GANGNAM", VehicleStatus.AVAILABLE))
                 .thenReturn(Optional.of(vehicle));
 
-        ReservationCreatedEvent event = new ReservationCreatedEvent(
+        PaymentAuthorizedEvent event = new PaymentAuthorizedEvent(
                 UUID.randomUUID(), Instant.now(), "R-1", 1,
-                "R-1", "CUST-1", VehicleType.COMPACT, "SEOUL_GANGNAM",
-                Instant.now(), Instant.now().plusSeconds(3600), new BigDecimal("150000"));
+                "R-1", "PAY-1", new BigDecimal("150000"), VehicleType.COMPACT, "SEOUL_GANGNAM");
 
-        vehicleAssignmentService.handleReservationCreated(event);
+        vehicleAssignmentService.handlePaymentAuthorized(event);
 
         assertThat(vehicle.getStatus()).isEqualTo(VehicleStatus.ASSIGNED);
 
@@ -79,17 +78,16 @@ class VehicleAssignmentServiceTest {
     }
 
     @Test
-    void handleReservationCreated_publishesAssignFailedWhenOutOfStock() throws Exception {
+    void handlePaymentAuthorized_publishesAssignFailedWhenOutOfStock() throws Exception {
         when(vehicleRepository.findFirstByVehicleTypeAndBranchIdAndStatus(
                 VehicleType.VAN, "BUSAN_HAEUNDAE", VehicleStatus.AVAILABLE))
                 .thenReturn(Optional.empty());
 
-        ReservationCreatedEvent event = new ReservationCreatedEvent(
+        PaymentAuthorizedEvent event = new PaymentAuthorizedEvent(
                 UUID.randomUUID(), Instant.now(), "R-2", 1,
-                "R-2", "CUST-2", VehicleType.VAN, "BUSAN_HAEUNDAE",
-                Instant.now(), Instant.now().plusSeconds(3600), new BigDecimal("300000"));
+                "R-2", "PAY-2", new BigDecimal("300000"), VehicleType.VAN, "BUSAN_HAEUNDAE");
 
-        vehicleAssignmentService.handleReservationCreated(event);
+        vehicleAssignmentService.handlePaymentAuthorized(event);
 
         ArgumentCaptor<OutboxEvent> captor = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxEventRepository).save(captor.capture());
@@ -112,7 +110,7 @@ class VehicleAssignmentServiceTest {
 
         PaymentFailedEvent event = new PaymentFailedEvent(
                 UUID.randomUUID(), Instant.now(), "R-3", 1,
-                "R-3", "V-1", PaymentFailedEvent.Reason.INSUFFICIENT_LIMIT);
+                "R-3", "V-1", PaymentFailedEvent.Reason.AUTHORIZATION_EXPIRED);
 
         vehicleAssignmentService.handlePaymentFailed(event);
 

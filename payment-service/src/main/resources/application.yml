@@ -40,5 +40,8 @@ logging:
 
 app:
   payment:
-    # 이 금액을 초과하는 예약은 결제 실패(INSUFFICIENT_LIMIT)로 시뮬레이션한다.
+    # 이 금액을 초과하는 예약은 가승인 실패(INSUFFICIENT_LIMIT)로 시뮬레이션한다.
     fail-above-amount: 1000000
+    # 가승인(한도 보류)의 유효기간. 이 시간이 지난 뒤에 매입(capture)하려 하면
+    # AUTHORIZATION_EXPIRED로 실패하고 차량 배정 보상이 실행된다 (카드사 보류 만료 흉내).
+    authorization-ttl: PT30M

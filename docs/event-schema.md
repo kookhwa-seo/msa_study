@@ -20,13 +20,20 @@ Choreography 기반 Saga에서 서비스 간 주고받는 이벤트 정의. 모�
 
 | Topic | Event | Producer | Consumer | 용도 |
 |---|---|---|---|---|
-| `reservation-events` | ReservationCreated | reservation-service | vehicle-service | 예약 생성 → 차량 배정 트리거 |
-| `vehicle-events` | VehicleAssigned | vehicle-service | payment-service | 차량 배정 성공 → 결제 트리거 |
-| `vehicle-events` | VehicleAssignFailed | vehicle-service | reservation-service | 재고 없음 → 예약 취소 |
-| `vehicle-events` | VehicleReleased | vehicle-service | reservation-service, notification-service | 결제 실패로 인한 배정 취소(보상) 완료 |
-| `payment-events` | PaymentCompleted | payment-service | reservation-service, notification-service | 결제 성공 → 예약 확정 |
-| `payment-events` | PaymentFailed | payment-service | vehicle-service, notification-service | 결제 실패 → 차량 배정 보상 트리거 |
+| `reservation-events` | ReservationCreated | reservation-service | payment-service | 예약 생성 → 가승인 트리거 |
+| `payment-events` | PaymentAuthorized | payment-service | vehicle-service | 가승인 성공 → 차량 배정 트리거 |
+| `payment-events` | PaymentAuthFailed | payment-service | reservation-service, notification-service | 가승인 거절 → 예약 취소 (배정 전이라 보상 없음) |
+| `vehicle-events` | VehicleAssigned | vehicle-service | payment-service, reservation-service | 차량 배정 성공 → 가승인 매입(capture) 트리거 / 예약 PAYMENT_PENDING |
+| `vehicle-events` | VehicleAssignFailed | vehicle-service | payment-service | 재고 없음 → 가승인 취소(void) 트리거 |
+| `payment-events` | PaymentVoided | payment-service | reservation-service | 가승인 취소(보상) 완료 → 예약 취소 |
+| `payment-events` | PaymentCompleted | payment-service | reservation-service, notification-service | 매입 성공 → 예약 확정 |
+| `payment-events` | PaymentFailed | payment-service | vehicle-service, notification-service | 매입 실패(가승인 만료 등) → 차량 배정 보상 트리거 |
+| `vehicle-events` | VehicleReleased | vehicle-service | reservation-service | 매입 실패로 인한 배정 취소(보상) 완료 |
 | `reservation-events` | ReservationCancelled | reservation-service | notification-service | 최종 취소 확정 → 알림 발송 |
+
+결제는 **가승인(authorize) → 차량 배정 → 매입(capture)** 순서다. 가승인은 카드 한도만 보류할 뿐
+돈이 움직이지 않으므로, 결제 안 된 주문이 차량을 점유하지 않으면서도 재고 부족 시 보상이 환불이
+아니라 보류 해제(void)로 끝난다.
 
 같은 애그리거트(예약)에 대한 이벤트 순서를 보장하기 위해 Kafka 메시지 key는 항상 `reservationId`를
 사용한다 (같은 key는 같은 파티션으로 가서 순서가 보장됨).
@@ -48,6 +55,41 @@ Choreography 기반 Saga에서 서비스 간 주고받는 이벤트 정의. 모�
   "rentalStartAt": "Instant",
   "rentalEndAt": "Instant",
   "totalAmount": "BigDecimal"
+}
+```
+
+### PaymentAuthorized
+```json
+{
+  "...envelope",
+  "reservationId": "string",
+  "paymentId": "string",
+  "amount": "BigDecimal",
+  "vehicleType": "COMPACT | SUV | VAN",
+  "branchId": "string"
+}
+```
+`vehicleType`/`branchId`를 포함하는 이유: 다음 단계인 vehicle-service가 차량을 배정하려면 이 값이
+필요하다. vehicle-service가 `reservation-events`를 따로 구독해 로컬에 복사해두면 서로 다른 토픽의
+이벤트 도착 순서에 의존하게 되므로(배정이 스냅샷 저장보다 먼저 처리되면 실패), 다음 단계에 필요한
+값을 이벤트에 그대로 실어 보내 순서 의존을 없앤다.
+
+### PaymentAuthFailed
+```json
+{
+  "...envelope",
+  "reservationId": "string",
+  "reason": "CARD_DECLINED | INSUFFICIENT_LIMIT | GATEWAY_TIMEOUT"
+}
+```
+차량 배정 전에 실패하므로 `vehicleId`가 없고, 되돌릴 보상도 없다.
+
+### PaymentVoided
+```json
+{
+  "...envelope",
+  "reservationId": "string",
+  "paymentId": "string"
 }
 ```
 
@@ -87,9 +129,10 @@ Choreography 기반 Saga에서 서비스 간 주고받는 이벤트 정의. 모�
   "...envelope",
   "reservationId": "string",
   "vehicleId": "string",
-  "reason": "CARD_DECLINED | INSUFFICIENT_LIMIT | GATEWAY_TIMEOUT"
+  "reason": "CARD_DECLINED | INSUFFICIENT_LIMIT | GATEWAY_TIMEOUT | AUTHORIZATION_EXPIRED"
 }
 ```
+매입(capture) 단계에서 실패했을 때만 발행한다 (예: 가승인 유효기간 만료).
 `vehicleId`를 포함하는 이유: payment-service는 자기 DB에 vehicleId를 갖고 있지 않지만,
 vehicle-service가 보상(재고 반환) 처리할 때 어떤 차량을 되돌려야 하는지 알아야 하기 때문에
 Saga 흐름을 타고 온 값을 그대로 실어 보낸다 (Choreography에서 흔한 패턴).
@@ -115,17 +158,28 @@ Saga 흐름을 타고 온 값을 그대로 실어 보낸다 (Choreography에서 
 ## Saga 상태 전이 (Reservation 기준)
 
 ```
-PENDING --(VehicleAssignFailed)--> CANCELLED
-PENDING --(VehicleAssigned)--> PAYMENT_PENDING
-PAYMENT_PENDING --(PaymentCompleted)--> CONFIRMED
+PENDING --(PaymentAuthFailed)--> CANCELLED
+PENDING --(PaymentAuthorized → VehicleAssigned)--> PAYMENT_PENDING   # 가승인 + 배정 완료, 매입 대기
+PENDING --(PaymentAuthorized → VehicleAssignFailed → payment-service void → PaymentVoided)--> CANCELLED
+PAYMENT_PENDING --(VehicleAssigned → 매입 → PaymentCompleted)--> CONFIRMED
 PAYMENT_PENDING --(PaymentFailed → vehicle-service 보상 → VehicleReleased)--> CANCELLED
 ```
 
-`PaymentFailed`는 reservation-service가 직접 구독하지 않는다. vehicle-service가 이를 구독해
-배정했던 차량을 재고로 되돌리는 보상 트랜잭션을 수행한 뒤 `VehicleReleased`를 발행하고,
-reservation-service는 그 이벤트를 받았을 때 비로소 최종 취소(`CANCELLED`)로 전환한다 — Saga
-보상은 "실패 이벤트를 직접 반응"하는 게 아니라 "보상이 끝났다는 이벤트에 반응"하는 것이라는
-점을 보여주는 지점.
+`VehicleAssignFailed`와 `PaymentFailed`는 reservation-service가 직접 구독하지 않는다. 각각
+payment-service가 가승인을 취소(`PaymentVoided`)하거나 vehicle-service가 배정을 되돌린
+(`VehicleReleased`) 뒤에 발행하는 **보상 완료 이벤트**를 받았을 때 비로소 최종 취소(`CANCELLED`)로
+전환한다 — Saga 보상은 "실패 이벤트에 직접 반응"하는 게 아니라 "보상이 끝났다는 이벤트에 반응"하는
+것이라는 점을 보여주는 지점. `PaymentAuthFailed`만 예외로 직접 취소하는데, 차량 배정 전이라 되돌릴
+보상 자체가 없기 때문이다.
+
+## Payment 상태 (payment-service 내부)
+
+```
+AUTHORIZED --capture--> CAPTURED    (VehicleAssigned 수신, 실제 청구 확정)
+AUTHORIZED --void-----> VOIDED      (VehicleAssignFailed 수신, 보류만 해제)
+AUTHORIZED --expire---> EXPIRED     (매입 시점에 가승인 유효기간 경과 → PaymentFailed 발행)
+(가승인 시도 거절) --> AUTH_FAILED
+```
 
 ## 멱등성/재처리 메모
 - Consumer는 `eventId` 기준으로 처리 이력을 남겨(처리된 eventId 테이블 또는 유니크 제약) 같은

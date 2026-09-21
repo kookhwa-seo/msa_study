@@ -2,11 +2,12 @@ package com.msastudy.reservation.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.msastudy.common.event.PaymentAuthFailedEvent;
 import com.msastudy.common.event.PaymentCompletedEvent;
+import com.msastudy.common.event.PaymentVoidedEvent;
 import com.msastudy.common.event.ReservationCancelledEvent;
 import com.msastudy.common.event.ReservationCreatedEvent;
 import com.msastudy.common.event.Topics;
-import com.msastudy.common.event.VehicleAssignFailedEvent;
 import com.msastudy.common.event.VehicleAssignedEvent;
 import com.msastudy.common.event.VehicleReleasedEvent;
 import com.msastudy.reservation.domain.ProcessedEvent;
@@ -82,8 +83,8 @@ public class ReservationService {
     }
 
     /**
-     * 차량 배정은 됐지만 아직 결제가 끝나지 않은 상태. 실제 CONFIRMED 전환은
-     * PaymentCompleted 이벤트를 받았을 때(handlePaymentCompleted) 이뤄진다.
+     * 가승인은 이미 성공했고 차량 배정까지 끝난 상태. 아직 매입(실제 청구 확정)은 되지 않았다.
+     * 실제 CONFIRMED 전환은 PaymentCompleted 이벤트를 받았을 때(handlePaymentCompleted) 이뤄진다.
      */
     @Transactional
     public void handleVehicleAssigned(VehicleAssignedEvent event) {
@@ -97,9 +98,29 @@ public class ReservationService {
         processedEventRepository.save(ProcessedEvent.of(event.eventId()));
     }
 
+    /**
+     * 가승인 자체가 거절된 경우. 차량 배정 전이라 되돌릴 보상이 없어서 바로 최종 취소한다.
+     */
     @Transactional
-    public void handleVehicleAssignFailed(VehicleAssignFailedEvent event) {
-        if (alreadyProcessed(event.eventId(), VehicleAssignFailedEvent.TYPE)) {
+    public void handlePaymentAuthFailed(PaymentAuthFailedEvent event) {
+        if (alreadyProcessed(event.eventId(), PaymentAuthFailedEvent.TYPE)) {
+            return;
+        }
+
+        Reservation reservation = getOrThrow(event.reservationId());
+        reservation.cancel();
+        publishCancelled(reservation, ReservationCancelledEvent.Reason.PAYMENT_FAILED);
+
+        processedEventRepository.save(ProcessedEvent.of(event.eventId()));
+    }
+
+    /**
+     * 재고 부족(VehicleAssignFailed)으로 payment-service가 가승인을 취소(보상)한 뒤 보낸 이벤트.
+     * VehicleAssignFailed에 직접 반응하지 않고 이 보상 완료 시점에 비로소 예약을 최종 취소한다.
+     */
+    @Transactional
+    public void handlePaymentVoided(PaymentVoidedEvent event) {
+        if (alreadyProcessed(event.eventId(), PaymentVoidedEvent.TYPE)) {
             return;
         }
 
@@ -123,8 +144,8 @@ public class ReservationService {
     }
 
     /**
-     * 차량 배정까지는 성공했지만 결제가 실패해 vehicle-service가 배정을 취소(보상)한
-     * 뒤 보낸 이벤트. 이 시점에 비로소 예약을 최종 취소 처리한다 (Saga 보상의 마지막 단계).
+     * 차량 배정까지는 성공했지만 매입 단계에서 결제가 실패해(예: 가승인 만료) vehicle-service가
+     * 배정을 취소(보상)한 뒤 보낸 이벤트. 이 시점에 비로소 예약을 최종 취소 처리한다 (Saga 보상의 마지막 단계).
      */
     @Transactional
     public void handleVehicleReleased(VehicleReleasedEvent event) {

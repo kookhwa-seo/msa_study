@@ -2,6 +2,7 @@ package com.msastudy.notification.messaging;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.msastudy.common.event.PaymentAuthFailedEvent;
 import com.msastudy.common.event.PaymentCompletedEvent;
 import com.msastudy.common.event.PaymentFailedEvent;
 import com.msastudy.common.event.Topics;
@@ -32,6 +33,11 @@ public class PaymentEventConsumer {
                 PaymentCompletedEvent event = objectMapper.readValue(payload, PaymentCompletedEvent.class);
                 log.info("[알림톡] 예약 {} 결제가 완료되었습니다. (결제ID: {}, 금액: {})",
                         event.reservationId(), event.paymentId(), event.amount());
+            }
+            case PaymentAuthFailedEvent.TYPE -> {
+                PaymentAuthFailedEvent event = objectMapper.readValue(payload, PaymentAuthFailedEvent.class);
+                log.info("[알림톡] 예약 {} 결제 승인이 거절되었습니다. (사유: {})",
+                        event.reservationId(), event.reason());
             }
             case PaymentFailedEvent.TYPE -> {
                 PaymentFailedEvent event = objectMapper.readValue(payload, PaymentFailedEvent.class);

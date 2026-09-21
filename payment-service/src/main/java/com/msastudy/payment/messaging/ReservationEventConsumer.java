@@ -11,8 +11,8 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 /**
- * reservation-events 토픽을 구독한다. payment-service는 결제에 필요한 금액 정보를
- * 얻기 위해 ReservationCreated를 구독해 로컬에 스냅샷을 저장해둔다.
+ * reservation-events 토픽을 구독한다. payment-service는 Saga의 첫 단계다 — 예약이 접수되면
+ * (ReservationCreated) 곧바로 가승인을 시도하고, 성공해야 차량 배정이 시작된다.
  */
 @Component
 @RequiredArgsConstructor

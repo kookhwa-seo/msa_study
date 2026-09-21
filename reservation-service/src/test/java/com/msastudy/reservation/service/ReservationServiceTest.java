@@ -8,11 +8,12 @@ import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.msastudy.common.event.PaymentAuthFailedEvent;
 import com.msastudy.common.event.PaymentCompletedEvent;
+import com.msastudy.common.event.PaymentVoidedEvent;
 import com.msastudy.common.event.ReservationCancelledEvent;
 import com.msastudy.common.event.ReservationCreatedEvent;
 import com.msastudy.common.event.Topics;
-import com.msastudy.common.event.VehicleAssignFailedEvent;
 import com.msastudy.common.event.VehicleAssignedEvent;
 import com.msastudy.common.event.VehicleReleasedEvent;
 import com.msastudy.common.event.VehicleType;
@@ -154,17 +155,17 @@ class ReservationServiceTest {
     }
 
     @Test
-    void handleVehicleAssignFailed_cancelsReservationAndPublishesCancelledEvent() throws Exception {
+    void handlePaymentVoided_cancelsReservationAndPublishesCancelledEventWithOutOfStockReason() throws Exception {
         Reservation reservation = Reservation.create(
                 "CUST-1", VehicleType.VAN, "카니발", "BUSAN_HAEUNDAE",
                 Instant.now(), Instant.now().plusSeconds(3600), new BigDecimal("300000"));
         when(reservationRepository.findById(reservation.getId())).thenReturn(Optional.of(reservation));
 
-        VehicleAssignFailedEvent event = new VehicleAssignFailedEvent(
+        PaymentVoidedEvent event = new PaymentVoidedEvent(
                 UUID.randomUUID(), Instant.now(), reservation.getId(), 1,
-                reservation.getId(), VehicleAssignFailedEvent.Reason.OUT_OF_STOCK);
+                reservation.getId(), "PAY-1");
 
-        reservationService.handleVehicleAssignFailed(event);
+        reservationService.handlePaymentVoided(event);
 
         assertThat(reservation.getStatus()).isEqualTo(ReservationStatus.CANCELLED);
 
@@ -179,5 +180,27 @@ class ReservationServiceTest {
                 objectMapper.readValue(outboxEvent.getPayload(), ReservationCancelledEvent.class);
         assertThat(cancelled.reason()).isEqualTo(ReservationCancelledEvent.Reason.OUT_OF_STOCK);
         assertThat(cancelled.reservationId()).isEqualTo(reservation.getId());
+    }
+
+    @Test
+    void handlePaymentAuthFailed_cancelsReservationAndPublishesCancelledEventWithPaymentFailedReason() throws Exception {
+        Reservation reservation = Reservation.create(
+                "CUST-1", VehicleType.SUV, "싼타페", "SEOUL_GANGNAM",
+                Instant.now(), Instant.now().plusSeconds(3600), new BigDecimal("2000000"));
+        when(reservationRepository.findById(reservation.getId())).thenReturn(Optional.of(reservation));
+
+        PaymentAuthFailedEvent event = new PaymentAuthFailedEvent(
+                UUID.randomUUID(), Instant.now(), reservation.getId(), 1,
+                reservation.getId(), PaymentAuthFailedEvent.Reason.INSUFFICIENT_LIMIT);
+
+        reservationService.handlePaymentAuthFailed(event);
+
+        assertThat(reservation.getStatus()).isEqualTo(ReservationStatus.CANCELLED);
+
+        ArgumentCaptor<OutboxEvent> captor = ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outboxEventRepository).save(captor.capture());
+        ReservationCancelledEvent cancelled =
+                objectMapper.readValue(captor.getValue().getPayload(), ReservationCancelledEvent.class);
+        assertThat(cancelled.reason()).isEqualTo(ReservationCancelledEvent.Reason.PAYMENT_FAILED);
     }
 }

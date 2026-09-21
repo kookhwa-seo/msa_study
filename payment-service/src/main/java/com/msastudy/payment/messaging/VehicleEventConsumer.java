@@ -3,6 +3,7 @@ package com.msastudy.payment.messaging;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.msastudy.common.event.Topics;
+import com.msastudy.common.event.VehicleAssignFailedEvent;
 import com.msastudy.common.event.VehicleAssignedEvent;
 import com.msastudy.payment.service.PaymentService;
 import lombok.RequiredArgsConstructor;
@@ -11,8 +12,8 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 /**
- * vehicle-events 토픽을 구독한다. payment-service는 차량 배정이 성공했을 때(VehicleAssigned)
- * 비로소 결제를 시도한다.
+ * vehicle-events 토픽을 구독한다. 차량 배정이 성공하면(VehicleAssigned) 가승인을 매입(capture)하고,
+ * 배정이 실패하면(VehicleAssignFailed) 가승인을 취소(void)한다.
  */
 @Component
 @RequiredArgsConstructor
@@ -27,11 +28,12 @@ public class VehicleEventConsumer {
         JsonNode node = objectMapper.readTree(payload);
         String eventType = node.get("eventType").asText();
 
-        if (VehicleAssignedEvent.TYPE.equals(eventType)) {
-            paymentService.handleVehicleAssigned(
+        switch (eventType) {
+            case VehicleAssignedEvent.TYPE -> paymentService.handleVehicleAssigned(
                     objectMapper.readValue(payload, VehicleAssignedEvent.class));
-        } else {
-            log.debug("payment-service가 처리하지 않는 이벤트 타입: {}", eventType);
+            case VehicleAssignFailedEvent.TYPE -> paymentService.handleVehicleAssignFailed(
+                    objectMapper.readValue(payload, VehicleAssignFailedEvent.class));
+            default -> log.debug("payment-service가 처리하지 않는 이벤트 타입: {}", eventType);
         }
     }
 }

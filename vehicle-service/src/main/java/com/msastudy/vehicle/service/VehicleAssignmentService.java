@@ -2,8 +2,8 @@ package com.msastudy.vehicle.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.msastudy.common.event.PaymentAuthorizedEvent;
 import com.msastudy.common.event.PaymentFailedEvent;
-import com.msastudy.common.event.ReservationCreatedEvent;
 import com.msastudy.common.event.Topics;
 import com.msastudy.common.event.VehicleAssignFailedEvent;
 import com.msastudy.common.event.VehicleAssignedEvent;
@@ -37,18 +37,22 @@ public class VehicleAssignmentService {
     private final ObjectMapper objectMapper;
 
     /**
+     * 가승인이 성공한 예약에 대해서만 재고 배정을 시도한다 (결제 안 된 주문이 차량을 잡지 않는다).
      * 재고 배정 시도 + outbox 저장을 하나의 트랜잭션으로 묶는다. 배정 성공/실패 어느 쪽이든
      * 결과 이벤트는 outbox를 거쳐 나가므로, 배정 상태 변경과 이벤트 발행 사이에 이중 쓰기
      * 문제가 생기지 않는다.
      *
-     * Kafka는 at-least-once 전달이라 같은 ReservationCreated가 재전달될 수 있다. eventId가
+     * Kafka는 at-least-once 전달이라 같은 PaymentAuthorized가 재전달될 수 있다. eventId가
      * 이미 처리된 적 있으면 재배정을 시도하지 않고 건너뛴다 — 그렇지 않으면 재고가 남아있을 때
      * 같은 예약에 차량이 두 번 배정되고 VehicleAssigned도 중복 발행될 수 있다.
+     *
+     * 차종/지점은 PaymentAuthorized가 실어 보낸 값을 그대로 쓴다 (reservation-service를
+     * 조회하거나 ReservationCreated를 따로 구독하지 않는다).
      */
     @Transactional
-    public void handleReservationCreated(ReservationCreatedEvent event) {
+    public void handlePaymentAuthorized(PaymentAuthorizedEvent event) {
         if (processedEventRepository.existsById(event.eventId())) {
-            log.info("이미 처리한 이벤트, 스킵: eventId={}, type={}", event.eventId(), ReservationCreatedEvent.TYPE);
+            log.info("이미 처리한 이벤트, 스킵: eventId={}, type={}", event.eventId(), PaymentAuthorizedEvent.TYPE);
             return;
         }
 
@@ -67,7 +71,7 @@ public class VehicleAssignmentService {
     }
 
     /**
-     * 결제 실패에 대한 보상 트랜잭션: 배정했던 차량을 다시 재고로 돌리고, 그 결과를
+     * 매입 단계 결제 실패(예: 가승인 만료)에 대한 보상 트랜잭션: 배정했던 차량을 다시 재고로 돌리고, 그 결과를
      * VehicleReleased 이벤트로 발행한다 (reservation-service가 이를 받아 최종 취소 처리).
      */
     @Transactional
@@ -95,7 +99,7 @@ public class VehicleAssignmentService {
         processedEventRepository.save(ProcessedEvent.of(event.eventId()));
     }
 
-    private void publishAssigned(ReservationCreatedEvent event, Vehicle vehicle) {
+    private void publishAssigned(PaymentAuthorizedEvent event, Vehicle vehicle) {
         VehicleAssignedEvent assigned = new VehicleAssignedEvent(
                 UUID.randomUUID(),
                 Instant.now(),
@@ -109,7 +113,7 @@ public class VehicleAssignmentService {
                 Topics.VEHICLE_EVENTS, event.reservationId(), VehicleAssignedEvent.TYPE, writeJson(assigned)));
     }
 
-    private void publishAssignFailed(ReservationCreatedEvent event) {
+    private void publishAssignFailed(PaymentAuthorizedEvent event) {
         VehicleAssignFailedEvent failed = new VehicleAssignFailedEvent(
                 UUID.randomUUID(),
                 Instant.now(),
