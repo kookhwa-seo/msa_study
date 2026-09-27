@@ -22,6 +22,8 @@ dependencies {
     implementation("org.springframework.kafka:spring-kafka")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
     implementation("com.github.loki4j:loki-logback-appender:1.5.2")
+    // POST /api/reservations rate limiting(토큰 버킷, docs/rate-limiting-lab.md) 전용.
+    implementation("org.springframework.boot:spring-boot-starter-data-redis")
 
     runtimeOnly("org.postgresql:postgresql")
 

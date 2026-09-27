@@ -1,0 +1,27 @@
+server:
+  port: 8088
+  tomcat:
+    # Spring Boot 내장 Tomcat 기본값과 동일하게 명시적으로 둔다 - 이 실습에서 "스레드 풀 크기를
+    # 넘는 동시 요청"이 정확히 몇 명부터인지 알아야 하기 때문.
+    threads:
+      max: 200
+
+spring:
+  application:
+    name: http-client-lab
+  threads:
+    virtual:
+      # 가상 스레드 비교 실습(docs/virtual-thread-http-lab.md)에서 true로 토글한다. true가 되면
+      # Tomcat이 요청 처리에 플랫폼 스레드 풀 대신 가상 스레드를 쓴다 - /blocking 엔드포인트가
+      # 이 설정의 영향을 받는 대상이다.
+      enabled: false
+
+app:
+  mock-payment-gateway:
+    base-url: http://localhost:8087
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

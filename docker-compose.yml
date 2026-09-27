@@ -77,6 +77,22 @@ services:
     volumes:
       - payment-db-data:/var/lib/postgresql/data
 
+  # Rate limiting(토큰 버킷)과 가용 차량 수 캐싱 실습 전용. Saga 서비스 어디에도 필수 의존성이
+  # 아니다 - reservation-service가 기동 시점에 Redis에 연결하지만, 두 실습 모두 없어도 되는
+  # 부가 기능(rate limit 미적용/캐시 미스)으로 우아하게 degrade 하도록 만들지는 않았다(학습
+  # 목적상 "Redis가 없으면 무슨 일이 생기는지"까지 직접 보는 게 낫다고 판단) - 그래서 이 두
+  # 실습을 실행하려면 반드시 떠 있어야 한다.
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # 중앙 로그 수집. 각 서비스가 파일이 아니라 Loki HTTP API로 로그를 직접 push한다
   # (Promtail 불필요 — 서비스가 IntelliJ/gradle로 로컬 실행돼서 컨테이너 파일시스템에
   # 로그 파일이 없기 때문). reservationId(Saga 상관관계 ID)로 4개 서비스 로그를 한

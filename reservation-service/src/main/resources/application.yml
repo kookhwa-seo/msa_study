@@ -25,6 +25,18 @@ spring:
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+app:
+  rate-limit:
+    # POST /api/reservations 전용 토큰 버킷(docs/rate-limiting-lab.md). capacity = 순간적으로
+    # 몰리는 트래픽을 한 번에 받아줄 수 있는 최대치, refill-per-second = 그 뒤로 꾸준히
+    # 받아줄 수 있는 초당 처리량.
+    capacity: 50
+    refill-per-second: 50
 
 management:
   endpoints:

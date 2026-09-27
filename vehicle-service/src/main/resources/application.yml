@@ -25,6 +25,19 @@ spring:
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+app:
+  cache:
+    # 가용 차량 수 캐싱 실습(docs/availability-cache-lab.md) 전용. 짧게 두는 이유: 배정/보상으로
+    # 즉시 무효화되긴 하지만, 무효화 자체를 놓치는 경우(예: 코드 버그)에도 최대 이 시간만큼만
+    # stale 데이터가 노출되도록 하는 안전판.
+    availability-ttl-seconds: 10
+    # 적용 전/후 비교 실습 전용 토글. 평소(true)에는 그냥 켜져 있다.
+    enabled: true
 
 management:
   endpoints:

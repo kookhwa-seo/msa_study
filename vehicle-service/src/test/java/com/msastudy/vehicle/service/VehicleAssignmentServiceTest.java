@@ -2,6 +2,8 @@ package com.msastudy.vehicle.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -15,6 +17,7 @@ import com.msastudy.common.event.VehicleAssignFailedEvent;
 import com.msastudy.common.event.VehicleAssignedEvent;
 import com.msastudy.common.event.VehicleReleasedEvent;
 import com.msastudy.common.event.VehicleType;
+import com.msastudy.vehicle.cache.AvailabilityCacheService;
 import com.msastudy.vehicle.domain.Vehicle;
 import com.msastudy.vehicle.domain.VehicleStatus;
 import com.msastudy.vehicle.outbox.OutboxEvent;
@@ -23,12 +26,16 @@ import com.msastudy.vehicle.repository.ProcessedEventRepository;
 import com.msastudy.vehicle.repository.VehicleRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.Pageable;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 class VehicleAssignmentServiceTest {
 
@@ -36,6 +43,7 @@ class VehicleAssignmentServiceTest {
     private OutboxEventRepository outboxEventRepository;
     private ProcessedEventRepository processedEventRepository;
     private ObjectMapper objectMapper;
+    private AvailabilityCacheService availabilityCacheService;
     private VehicleAssignmentService vehicleAssignmentService;
 
     @BeforeEach
@@ -44,16 +52,20 @@ class VehicleAssignmentServiceTest {
         outboxEventRepository = mock(OutboxEventRepository.class);
         processedEventRepository = mock(ProcessedEventRepository.class);
         objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        availabilityCacheService = mock(AvailabilityCacheService.class);
         vehicleAssignmentService = new VehicleAssignmentService(
-                vehicleRepository, outboxEventRepository, processedEventRepository, objectMapper);
+                vehicleRepository, outboxEventRepository, processedEventRepository, objectMapper,
+                // 트랜잭션 동작 자체는 여기서 검증하지 않는다 — 콜백을 그대로 실행하면 충분하다.
+                new TransactionTemplate(mock(PlatformTransactionManager.class)),
+                availabilityCacheService);
     }
 
     @Test
     void handlePaymentAuthorized_assignsAvailableVehicleAndPublishesAssigned() throws Exception {
         Vehicle vehicle = Vehicle.of("V-1", VehicleType.COMPACT, "SEOUL_GANGNAM");
-        when(vehicleRepository.findFirstByVehicleTypeAndBranchIdAndStatus(
-                VehicleType.COMPACT, "SEOUL_GANGNAM", VehicleStatus.AVAILABLE))
-                .thenReturn(Optional.of(vehicle));
+        when(vehicleRepository.lockFirstAvailable(
+                eq(VehicleType.COMPACT), eq("SEOUL_GANGNAM"), eq(VehicleStatus.AVAILABLE), any(Pageable.class)))
+                .thenReturn(List.of(vehicle));
 
         PaymentAuthorizedEvent event = new PaymentAuthorizedEvent(
                 UUID.randomUUID(), Instant.now(), "R-1", 1,
@@ -79,9 +91,9 @@ class VehicleAssignmentServiceTest {
 
     @Test
     void handlePaymentAuthorized_publishesAssignFailedWhenOutOfStock() throws Exception {
-        when(vehicleRepository.findFirstByVehicleTypeAndBranchIdAndStatus(
-                VehicleType.VAN, "BUSAN_HAEUNDAE", VehicleStatus.AVAILABLE))
-                .thenReturn(Optional.empty());
+        when(vehicleRepository.lockFirstAvailable(
+                eq(VehicleType.VAN), eq("BUSAN_HAEUNDAE"), eq(VehicleStatus.AVAILABLE), any(Pageable.class)))
+                .thenReturn(List.of());
 
         PaymentAuthorizedEvent event = new PaymentAuthorizedEvent(
                 UUID.randomUUID(), Instant.now(), "R-2", 1,

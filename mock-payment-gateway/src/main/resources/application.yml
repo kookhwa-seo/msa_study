@@ -1,0 +1,18 @@
+server:
+  port: 8087
+  tomcat:
+    # 이 서버 자체가 병목이 되면 안 된다 - 측정하려는 건 호출하는 쪽(http-client-lab)의
+    # 블로킹/논블로킹 차이지, 이 가짜 외부 서버의 스레드 풀 크기가 아니다. 그래서 실제 결제망
+    # 서버라면 안 할 법한 큰 풀을 일부러 준다.
+    threads:
+      max: 1000
+
+spring:
+  application:
+    name: mock-payment-gateway
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

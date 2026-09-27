@@ -11,5 +11,7 @@ include(
     "eureka-server",
     "kafka-lab",
     "deadlock-lab",
-    "vthread-lab"
+    "vthread-lab",
+    "mock-payment-gateway",
+    "http-client-lab"
 )

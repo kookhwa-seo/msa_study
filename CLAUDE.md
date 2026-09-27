@@ -44,6 +44,37 @@
    원칙은 건드리지 않았다. reservation-service 2개 인스턴스 등록, 로드밸런싱 라운드로빈 실측,
    `kill -9`로 하트비트 기반 등록 해제 + 페일오버까지 검증 - 레지스트리 등록 해제(19초)와 실제
    트래픽 차단(131초) 사이의 캐시 지연을 실측한 게 이 실습의 핵심 발견)
+7. 동시 예약(차량 배정) 방어 (완료 — `docs/concurrent-booking-lab.md`. 요청은 "vehicleId+
+   timeSlot 유니크 제약"이었지만 이 프로젝트 도메인엔 그 필드들이 없어서, 실제로 존재하던
+   레이스 컨디션(`VehicleAssignmentService`가 같은 차량을 두 예약에 동시 배정할 수 있던 버그)을
+   찾아 비관적/낙관적 락으로 고쳤다. `VehicleAssignmentConcurrencyTest`로 20건 동시 요청 시
+   중복 배정 19건(락 없음) -> 0건(락 적용)을 실측, k6로 실제 HTTP+Kafka 파이프라인까지
+   재검증(재고 1대에 20명 동시 요청 -> 1명만 성공). `Vehicle`에 `@Version`을 기존 시딩 데이터가
+   있는 테이블에 추가하면서 겪은 백필 문제도 기록)
+8. 파티션 수 x 컨슈머 수 처리량 실습 (완료 — `docs/consumer-throughput-lab.md`. vehicle-service의
+   실제 PaymentAuthorized 컨슈머로 측정: 컨슈머 1개면 파티션을 늘려도 처리량 그대로(741.8 ->
+   779.5 msg/s), 컨슈머를 2/4개로 늘리면 거의 정비례(최대 2,176.8 msg/s), 컨슈머가 파티션
+   수(4개)를 넘으면(5개) 5번째는 파티션을 아예 못 받고 노는 것까지 로그로 확인. 덤으로 파티션을
+   늘린 직후 컨슈머가 새 파티션을 바로 못 알아채 일시적으로 6배 느려지는 현상도 실측)
+9. 블로킹 vs 논블로킹 외부 API 호출 (완료 — `docs/blocking-vs-nonblocking-lab.md`. 독립 서비스
+   `mock-payment-gateway`(가짜 결제망, 200~500ms 지연) + `http-client-lab`(RestClient `/blocking`
+   vs WebClient `/nonblocking`). 동시 500명(풀 크기 200 초과)에서 블로킹 555.7 req/s·p99 1040ms
+   vs 논블로킹 1,380.0 req/s·p99 505ms)
+10. 가상 스레드로 블로킹 호출 살리기 (완료 — `docs/virtual-thread-http-lab.md`. 9번의
+    `/blocking` 코드를 그대로 두고 `spring.threads.virtual.enabled=true`만 켜서 동시 500명에서
+    1,384.0 req/s·p99 503ms까지 향상 - WebClient와 오차 범위 안에서 동일)
+11. POST /api/reservations Rate Limiting (완료 — `docs/rate-limiting-lab.md`. Redis 토큰 버킷
+    (`TokenBucketRateLimiter` + `token_bucket.lua`, IP별, capacity=50/refill=50/s)을
+    `RateLimitFilter`로 적용, 버킷이 비면 즉시 429. 500명 동시 스파이크 실측: 미적용 시
+    500/500 성공하지만 p99 2.69s, 적용 시 92/500만 성공(408건 429)하고 성공 응답 p99는
+    487.87ms — "전부 받아내려는 것"과 "감당할 수 있는 만큼만 받아 서비스를 지키는 것" 사이의
+    트레이드오프를 실측으로 확인)
+12. 가용 차량 수 Redis 캐싱 (완료 — `docs/availability-cache-lab.md`. `GET /api/branches/
+    {branchId}/stock`을 `availability:{vehicleType}:{branchId}` 키로 cache-aside 캐싱(TTL
+    10초), 배정/보상 시 커밋 이후(`afterCommit`)에 무효화. 100 VU 반복 조회 실측: TPS/p99는
+    거의 그대로(로컬 COUNT 쿼리가 이미 싸고 HTTP 루프백이 병목)였지만 DB 쿼리 수는
+    31,695 -> 263(99.2% 감소) - "캐싱 효과는 병목 위치에 따라 체감되는 지표가 다르다"는
+    결론. `AvailabilityCacheConsistencyTest`로 캐시 히트/무효화 정합성 검증)
 
 ## 아키텍처
 - Database per Service: 서비스별 Postgres 인스턴스 분리 (`docker-compose.yml`의
@@ -69,7 +100,9 @@
   디스커버리가 필요한 지점이 API Gateway -> reservation-service뿐이라서. 여러 인스턴스를 동시에
   띄울 수 있게 `eureka.instance.instance-id`에 포트를 포함시켰고(`SERVER_PORT` 환경변수로 포트
   변경), 어느 인스턴스가 응답했는지 확인용 `X-Instance-Port` 응답 헤더(`InstancePortHeaderFilter`)를
-  추가했다 — 실습 관측 목적일 뿐 비즈니스 로직과 무관.
+  추가했다 — 실습 관측 목적일 뿐 비즈니스 로직과 무관. `RateLimitFilter` + `TokenBucketRateLimiter`로
+  `POST /api/reservations`에 Redis 토큰 버킷 rate limit을 적용했다(`docs/rate-limiting-lab.md`) —
+  `app.rate-limit.enabled` 토글로 켜고 끌 수 있다(기본 true).
 - `eureka-server`: 서비스 레지스트리(포트 8761). 이 프로젝트에서 유일하게 동기 REST 호출 경로
   (API Gateway -> reservation-service)에 관여하는 인프라이고, Saga 서비스 간 통신은 여전히
   Kafka로만 이뤄진다는 원칙과 무관하다. 로컬 실습용으로 self-preservation을 끄고 하트비트/eviction
@@ -82,6 +115,18 @@
   기동 시 메모리에 올리고, `VehicleInventorySeeder`가 지점마다 차종별 0~3대를 고정 시드(42)로
   무작위 시딩한다. `GET /api/branches`(reservation-service 다음으로 두 번째 실제 비즈니스
   REST API)가 이 카탈로그를 그대로 반환해 프런트엔드의 시/도→시/군/구→동 드롭다운을 지원한다.
+  `VehicleAssignmentService.handlePaymentAuthorized`(프로덕션 경로)는 `SELECT ... FOR UPDATE`
+  비관적 락으로 같은 차량이 두 예약에 동시 배정되는 걸 막는다 — 같은 클래스에
+  `handlePaymentAuthorizedOptimistic`(`@Version` 낙관적 락)/`handlePaymentAuthorizedWithoutLock`
+  (락 없음, 버그 재현용)도 비교/테스트 전용으로 있다(`docs/concurrent-booking-lab.md`).
+  `Vehicle.version`은 낙관적 락 비교용으로만 실제로 쓰인다. `PaymentEventConsumer`의
+  `@KafkaListener` concurrency는 `app.vehicle.payment-events-concurrency`(기본 1) 프로퍼티로
+  뺐다 - 평소 동작에는 영향 없고, 파티션 x 컨슈머 수 처리량 실습(`docs/consumer-throughput-lab.md`)
+  에서 재기동할 때마다 값을 바꾸기 위한 것. `GET /api/branches/{branchId}/stock`은
+  `AvailabilityCacheService`로 Redis cache-aside 캐싱(`availability:{vehicleType}:{branchId}`,
+  TTL 10초)을 거친다 - `VehicleAssignmentService`가 배정/보상 커밋 이후(`afterCommit`)에
+  해당 키를 무효화한다(`docs/availability-cache-lab.md`). `app.cache.enabled` 토글로
+  켜고 끌 수 있다(기본 true).
 - `payment-service`: Saga의 첫 단계인 가승인(authorize) → 매입(capture) 2단계 결제. 금액이
   `app.payment.fail-above-amount`를 넘으면 가승인 거절로 시뮬레이션. `ReservationCreated` 구독 →
   가승인 → `PaymentAuthorized`(다음 단계 배정에 필요한 vehicleType/branchId 포함) / `PaymentAuthFailed`
@@ -116,6 +161,9 @@
   key 없이 보낸 이벤트가 순서 보장을 깨는 것과, `reservationId`처럼 key를 고정했을 때 순서가
   보장되는 것을 재현 (`docs/kafka-ordering-lab.md`). 이후 "대용량 트래픽 안정성 실습" 항목들도
   이 모듈 또는 해당 서비스 안에 같은 방식(직접 재현 → 원인 확인 → 해결)으로 추가된다.
+  `PaymentAuthorizedFloodProducer`(`floodPaymentAuthorized` 태스크)는 실제 `PaymentAuthorizedEvent`
+  스키마 그대로 `payment-events`에 대량 발행하고 같은 프로세스 안에서 AdminClient로 vehicle-service
+  컨슈머 그룹의 lag을 추적한다 - 파티션 x 컨슈머 수 처리량 실습(`docs/consumer-throughput-lab.md`)용.
 - `deadlock-lab`: 위와 같은 원칙의 독립 실습 모듈. Spring/JPA 없이 순수 JDBC로 vehicle-db의
   실제 `vehicle` 테이블 두 행을 `SELECT ... FOR UPDATE`로 잠근다. 두 트랜잭션이 반대 순서로
   잠그면 실제 Postgres 데드락(`SQLState 40P01`)이 나는 것과, 같은 순서로 잠그면 데드락 없이
@@ -123,6 +171,12 @@
 - `vthread-lab`: 위와 같은 원칙의 독립 실습 모듈. Spring 없이 순수 `java.util.concurrent`로
   가상 스레드와 플랫폼 스레드 풀(크기 200)을 I/O-bound(블로킹 sleep)/CPU-bound(소수 세기)
   워크로드에 각각 붙여 처리 시간을 비교 (`docs/vthread-lab.md`).
+- `mock-payment-gateway`(포트 8087): 블로킹 vs 논블로킹 실습 전용 독립 서버. Saga와 무관 -
+  요청마다 200~500ms 지연 후 응답해서 진짜 카드사/PG망을 흉내낸다.
+- `http-client-lab`(포트 8088): 같은 실습의 비교 앱. `/blocking`(RestClient)과
+  `/nonblocking`(WebClient)이 mock-payment-gateway를 각각 호출한다. `spring.threads.virtual
+  .enabled`를 토글해서 가상 스레드 비교도 같은 앱으로 한다(`docs/blocking-vs-nonblocking-lab.md`,
+  `docs/virtual-thread-http-lab.md`).
 
 ## 코딩 컨벤션
 - Spring Boot 3.4.x, Java 21 (Gradle Kotlin DSL, 멀티모듈).
