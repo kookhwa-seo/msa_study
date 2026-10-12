@@ -1,6 +1,6 @@
 # MSA Rental Study
 
-렌터카 예약(카밀라 도메인: 렌터카/보험대차/예약/결제)을 소재로 MSA 서비스 분리, Kafka 이벤트
+렌터카 예약(예약·차량 배정·결제 흐름)을 소재로 MSA 서비스 분리, Kafka 이벤트
 기반 통신, Outbox 패턴, Saga(Choreography)를 익히기 위한 **학습용** 프로젝트입니다.
 
 자세한 설계 배경/원칙은 [`CLAUDE.md`](./CLAUDE.md), 이벤트 스키마 전체 정의는
